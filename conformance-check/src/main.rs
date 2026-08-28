@@ -30,6 +30,16 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
 
+    // Name the fold. The checker certifies a store by folding it, so the
+    // verdict is only meaningful against a stated fold version — and when the
+    // checker's `yoagent-state` drifted from the runtimes', the skew was
+    // discoverable only by reading two lockfiles.
+    println!(
+        "conformance-check {} — folding with yoagent-state {}",
+        env!("CARGO_PKG_VERSION"),
+        env!("GASP_STATE_VERSION"),
+    );
+
     let mut failed = false;
     for report in conformance_check::run_all(&repo, fixture_facts) {
         let mark = if report.passed() { "PASS" } else { "FAIL" };

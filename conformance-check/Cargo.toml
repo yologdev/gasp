@@ -6,7 +6,7 @@ description = "GASP conformance checker — verifies an agent repo against Part 
 license = "MIT"
 
 [dependencies]
-yoagent-state = "0.4"
+yoagent-state = "0.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

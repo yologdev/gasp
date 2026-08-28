@@ -80,7 +80,10 @@ fn envelope_rejects_unknown_field() {
     let mut lines = fixture_lines();
     lines[0] = lines[0].replace("\"causation_id\"", "\"extra\":1,\"causation_id\"");
     let report = check_envelope(&lines);
-    assert!(fails_with(&report, "unknown top-level field `extra`"), "{report:?}");
+    assert!(
+        fails_with(&report, "unknown top-level field `extra`"),
+        "{report:?}"
+    );
 }
 
 #[test]
@@ -104,7 +107,11 @@ fn envelope_accepts_reordered_keys_and_nested_extras() {
 fn write_snapshot(repo: &Path, name: &str, snapshot: &Value) {
     let dir = repo.join("snapshots").join(name);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("graph.json"), serde_json::to_vec(snapshot).unwrap()).unwrap();
+    std::fs::write(
+        dir.join("graph.json"),
+        serde_json::to_vec(snapshot).unwrap(),
+    )
+    .unwrap();
 }
 
 fn valid_snapshot(repo: &Path, line_count: usize) -> Value {
@@ -138,42 +145,64 @@ fn snapshot_valid_passes_and_corruptions_fail() {
 
     // hash mismatch
     let mut bad = valid_snapshot(&repo, 5);
-    bad["integrity"]["sha256"] = json!("0000000000000000000000000000000000000000000000000000000000000000");
+    bad["integrity"]["sha256"] =
+        json!("0000000000000000000000000000000000000000000000000000000000000000");
     write_snapshot(&repo, "event_10", &bad);
-    assert!(fails_with(&check_replay(&repo, &events, &raw), "integrity hash mismatch"));
+    assert!(fails_with(
+        &check_replay(&repo, &events, &raw),
+        "integrity hash mismatch"
+    ));
 
     // line_count out of range
     let mut bad = valid_snapshot(&repo, 5);
     bad["integrity"]["line_count"] = json!(0);
     write_snapshot(&repo, "event_10", &bad);
-    assert!(fails_with(&check_replay(&repo, &events, &raw), "out of range"));
+    assert!(fails_with(
+        &check_replay(&repo, &events, &raw),
+        "out of range"
+    ));
     bad["integrity"]["line_count"] = json!(99);
     write_snapshot(&repo, "event_10", &bad);
-    assert!(fails_with(&check_replay(&repo, &events, &raw), "out of range"));
+    assert!(fails_with(
+        &check_replay(&repo, &events, &raw),
+        "out of range"
+    ));
 
     // missing integrity fields are reported as what they are
     let mut bad = valid_snapshot(&repo, 5);
     bad["integrity"].as_object_mut().unwrap().remove("sha256");
     write_snapshot(&repo, "event_10", &bad);
-    assert!(fails_with(&check_replay(&repo, &events, &raw), "missing `sha256`"));
+    assert!(fails_with(
+        &check_replay(&repo, &events, &raw),
+        "missing `sha256`"
+    ));
 
     // wrong terminal event id
     let mut bad = valid_snapshot(&repo, 5);
     bad["integrity"]["event_id"] = json!("event_99");
     write_snapshot(&repo, "event_10", &bad);
-    assert!(fails_with(&check_replay(&repo, &events, &raw), "not the last event"));
+    assert!(fails_with(
+        &check_replay(&repo, &events, &raw),
+        "not the last event"
+    ));
 
     // tampered graph diverges from the prefix fold
     let mut bad = valid_snapshot(&repo, 5);
     bad["graph"]["version"] = json!(999);
     write_snapshot(&repo, "event_10", &bad);
-    assert!(fails_with(&check_replay(&repo, &events, &raw), "differs from folding"));
+    assert!(fails_with(
+        &check_replay(&repo, &events, &raw),
+        "differs from folding"
+    ));
 
     // a snapshot dir without graph.json is noted, not silently skipped
     std::fs::remove_file(repo.join("snapshots/event_10/graph.json")).unwrap();
     let report = check_replay(&repo, &events, &raw);
     assert!(report.passed());
-    assert!(report.notes.iter().any(|n| n.contains("not verified")), "{report:?}");
+    assert!(
+        report.notes.iter().any(|n| n.contains("not verified")),
+        "{report:?}"
+    );
 }
 
 // ---- check 3: vocabulary + packs ----
@@ -201,7 +230,10 @@ fn pack_admits_custom_kind_and_malformed_pack_fails() {
     let events = parse_events(&lines).unwrap();
 
     // without a pack: undeclared
-    assert!(fails_with(&check_vocabulary(&repo, &events), "undeclared kind"));
+    assert!(fails_with(
+        &check_vocabulary(&repo, &events),
+        "undeclared kind"
+    ));
 
     // with a full pack declaring it: admitted
     std::fs::write(
@@ -331,9 +363,15 @@ fn append_only_fails_on_non_git_directory() {
 fn causation_rejects_dangling_reference() {
     let mut lines = fixture_lines();
     let i = line_of(&lines, |v| v["id"] == "event_10");
-    lines[i] = lines[i].replace("\"causation_id\":\"event_09\"", "\"causation_id\":\"event_99\"");
+    lines[i] = lines[i].replace(
+        "\"causation_id\":\"event_09\"",
+        "\"causation_id\":\"event_99\"",
+    );
     let events = parse_events(&lines).unwrap();
-    assert!(fails_with(&check_causation(&events), "does not reference an earlier event"));
+    assert!(fails_with(
+        &check_causation(&events),
+        "does not reference an earlier event"
+    ));
 }
 
 #[test]
@@ -367,7 +405,10 @@ fn causation_rejects_duplicate_and_self_referencing_ids() {
         r#"{"id":"event_x","schema_version":1,"ts_ms":1,"actor":{"kind":"agent","id":"a"},"kind":"goal.created","payload":{"id":"g"},"causation_id":"event_x","correlation_id":null}"#.to_string(),
     ];
     let events = parse_events(&lines).unwrap();
-    assert!(fails_with(&check_causation(&events), "does not reference an earlier event"));
+    assert!(fails_with(
+        &check_causation(&events),
+        "does not reference an earlier event"
+    ));
 }
 
 // ---- check 6: restore ----
@@ -382,7 +423,10 @@ fn restore_asserts_fixture_facts() {
     );
     let events = parse_events(&lines).unwrap();
     let report = check_restore(&fixture_dir(), &events, true);
-    assert!(fails_with(&report, "patch_9.status != Promoted"), "{report:?}");
+    assert!(
+        fails_with(&report, "patch_9.status != Promoted"),
+        "{report:?}"
+    );
 }
 
 // ---- check 7: pairing ----
@@ -393,7 +437,10 @@ fn pairing_rejects_missing_ops_event() {
     let i = line_of(&lines, |v| v["id"] == "event_02");
     lines.remove(i);
     let events = parse_events(&lines).unwrap();
-    assert!(fails_with(&check_pairing(&events), "no paired state.ops_applied"));
+    assert!(fails_with(
+        &check_pairing(&events),
+        "no paired state.ops_applied"
+    ));
 }
 
 #[test]
@@ -421,7 +468,10 @@ fn pairing_rejects_wrong_created_kind() {
     lines[i] = lines[i].replace("\"kind\":\"goal\"", "\"kind\":\"task\"");
     let events = parse_events(&lines).unwrap();
     // `task` is baseline vocabulary, so ONLY pairing catches this
-    assert!(fails_with(&check_pairing(&events), "created as kind `task`"));
+    assert!(fails_with(
+        &check_pairing(&events),
+        "created as kind `task`"
+    ));
 }
 
 #[test]
@@ -431,7 +481,10 @@ fn pairing_rejects_ops_chained_to_ops() {
         r#"{"id":"event_x","schema_version":1,"ts_ms":1739000001000,"actor":{"kind":"agent","id":"evolve"},"kind":"state.ops_applied","payload":[{"MarkStale":{"id":"goal_retry","reason":"x"}}],"causation_id":"event_02","correlation_id":null}"#.to_string(),
     );
     let events = parse_events(&lines).unwrap();
-    assert!(fails_with(&check_pairing(&events), "chained to another ops event"));
+    assert!(fails_with(
+        &check_pairing(&events),
+        "chained to another ops event"
+    ));
 }
 
 // ---- run_all + CLI ----
@@ -452,8 +505,17 @@ fn cli_exit_codes() {
     let dir = fixture_in_temp_git();
     let repo = dir.path().join("repo");
 
-    let ok = Command::new(bin).arg(&repo).arg("--fixture").output().unwrap();
-    assert_eq!(ok.status.code(), Some(0), "{}", String::from_utf8_lossy(&ok.stdout));
+    let ok = Command::new(bin)
+        .arg(&repo)
+        .arg("--fixture")
+        .output()
+        .unwrap();
+    assert_eq!(
+        ok.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&ok.stdout)
+    );
 
     // non-conformant repo -> 1
     let raw = std::fs::read_to_string(repo.join("state/events.jsonl")).unwrap();
@@ -468,12 +530,24 @@ fn cli_exit_codes() {
     // usage errors -> 2
     assert_eq!(Command::new(bin).output().unwrap().status.code(), Some(2));
     assert_eq!(
-        Command::new(bin).arg(&repo).arg("--fixtrue").output().unwrap().status.code(),
+        Command::new(bin)
+            .arg(&repo)
+            .arg("--fixtrue")
+            .output()
+            .unwrap()
+            .status
+            .code(),
         Some(2),
         "a typo'd flag must be a usage error, not a silently skipped assertion"
     );
     assert_eq!(
-        Command::new(bin).arg(&repo).arg(&repo).output().unwrap().status.code(),
+        Command::new(bin)
+            .arg(&repo)
+            .arg(&repo)
+            .output()
+            .unwrap()
+            .status
+            .code(),
         Some(2),
         "multiple repo paths must be a usage error, not last-wins"
     );
@@ -506,7 +580,12 @@ async fn gitventstore_emitted_repo_passes_all_checks() {
         .await
         .unwrap();
     let patch_id = state
-        .propose_patch(StatePatch::new(PatchId::new("patch_it"), "t", "s", actor.clone()))
+        .propose_patch(StatePatch::new(
+            PatchId::new("patch_it"),
+            "t",
+            "s",
+            actor.clone(),
+        ))
         .await
         .unwrap();
     state
@@ -546,7 +625,12 @@ async fn gitventstore_emitted_repo_passes_all_checks() {
         .await
         .unwrap();
     store
-        .commit_run(&RunId::new("run_it"), &GoalId::new("goal_it"), "promoted", &[])
+        .commit_run(
+            &RunId::new("run_it"),
+            &GoalId::new("goal_it"),
+            "promoted",
+            &[],
+        )
         .unwrap()
         .expect("boundary commit");
 
@@ -559,4 +643,65 @@ async fn gitventstore_emitted_repo_passes_all_checks() {
             report.failures
         );
     }
+}
+
+/// A store with a dangling op is **conformant**, and the certificate says so.
+///
+/// The checker answers "can a conformant runtime fold and restore this store?".
+/// Since yoagent-state 0.5.1 the answer for an op naming a missing node is
+/// yes — the op is skipped and the fold completes (yologdev/yoagent#168).
+///
+/// Failing here would report non-conformance for a store every runtime can
+/// restore, which inverts what the badge means. It is also the only outcome a
+/// user could not act on: an append-only log cannot have the op removed, and
+/// inserting a fix before it rewrites published history — permanently failing
+/// check 4, the property the format exists to guarantee.
+///
+/// Regression for the real case: `yologdev/yoyo-gasp` at 8,882 events with one
+/// dangling `UpdateNode`, which failed checks 2 and 6 before this.
+#[test]
+fn a_dangling_op_is_readable_and_reported_not_failed() {
+    let dir = fixture_in_temp_git();
+    let repo = dir.path().join("repo");
+    let log = repo.join("state/events.jsonl");
+
+    // Append an ops event updating a node nobody created — exactly the shape a
+    // multi-process writer produces when the creating process ran an older
+    // build.
+    // Derive the envelope from a real event rather than inventing one, so this
+    // tests the fold rather than the parser's required fields.
+    let mut raw = std::fs::read_to_string(&log).unwrap();
+    let template: Value = log_lines(&raw)
+        .iter()
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .find(|v| v["kind"] == "state.ops_applied")
+        .expect("fixture has an ops event to model");
+    let mut dangling = template.clone();
+    dangling["id"] = json!("event_dangling_probe");
+    dangling["ts_ms"] = json!(template["ts_ms"].as_i64().unwrap_or(0) + 1);
+    dangling["payload"] =
+        json!([{"UpdateNode": {"id": "node_never_created", "props": {"status": "closed"}}}]);
+    raw.push_str(&serde_json::to_string(&dangling).unwrap());
+    raw.push('\n');
+    std::fs::write(&log, &raw).unwrap();
+
+    let raw = read_log_raw(&repo).unwrap();
+    let events = parse_events(&log_lines(&raw)).expect("log parses");
+    let report = check_replay(&repo, &events, &raw);
+
+    assert!(
+        report.passed(),
+        "a store a runtime can restore must certify as conformant; failures: {:?}",
+        report.failures
+    );
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|n| n.contains("UpdateNode") && n.contains("skipped")),
+        "the skip must appear in the certificate — a report that hides it cannot be \
+         audited, and masking corruption is the failure mode this must not become. \
+         notes: {:?}",
+        report.notes
+    );
 }
