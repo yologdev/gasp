@@ -14,9 +14,16 @@
 use std::path::PathBuf;
 
 fn main() {
-    let lock = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(|p| p.join("Cargo.lock"));
+    // Both layouts, in this order. `cargo package` ships the lockfile at the
+    // *package* root, beside this build script — so looking only at the
+    // workspace parent worked in development and printed "unknown" for every
+    // installed build, which is the one place the line has to work. Cargo also
+    // regenerates the workspace lock before build scripts run, so the failure
+    // was unreachable in-tree.
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let lock = [manifest.join("Cargo.lock"), manifest.join("../Cargo.lock")]
+        .into_iter()
+        .find(|p| p.exists());
 
     let version = lock
         .as_ref()
@@ -32,13 +39,40 @@ fn main() {
     }
 }
 
-/// The `version = "x"` line following `name = "<crate>"` in a Cargo.lock.
+/// Every `version = "x"` following a `name = "<crate>"` in a Cargo.lock.
+///
+/// All of them, not the first. Cargo sorts by name then version ascending, so
+/// taking the first reports the *lowest* when two versions resolve — and this
+/// line exists precisely because 0.4 and 0.5 fold differently, so naming the
+/// wrong one is worse than naming none. Ambiguity is reported as such.
 fn resolved_version(lock: &str, crate_name: &str) -> Option<String> {
     let needle = format!("name = \"{crate_name}\"");
-    let mut lines = lock.lines().skip_while(|l| l.trim() != needle);
-    lines.next()?;
-    lines
-        .next()
-        .and_then(|l| l.trim().strip_prefix("version = "))
-        .map(|v| v.trim_matches('"').to_string())
+    let mut found: Vec<String> = Vec::new();
+    let lines: Vec<&str> = lock.lines().collect();
+    let mut in_package = false;
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        // Only `[[package]]` entries describe what was resolved. Cargo also
+        // emits `[[patch.unused]]` in the same shape, so collecting every
+        // matching name reported `ambiguous(...)` when a single version had
+        // resolved — reachable with `[patch.crates-io] yoagent-state = { path
+        // = ... }`, which is the obvious way to test a local fix.
+        if trimmed.starts_with("[[") {
+            in_package = trimmed == "[[package]]";
+        }
+        if !in_package || trimmed != needle {
+            continue;
+        }
+        if let Some(v) = lines
+            .get(i + 1)
+            .and_then(|l| l.trim().strip_prefix("version = "))
+        {
+            found.push(v.trim_matches('"').to_string());
+        }
+    }
+    match found.len() {
+        0 => None,
+        1 => found.pop(),
+        _ => Some(format!("ambiguous({})", found.join(","))),
+    }
 }
