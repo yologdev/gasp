@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::process::Command;
-use yoagent_state::{replay, Event, Graph, Pack, StateOp};
+use yoagent_state::{replay, replay_with_diagnostics, Event, Graph, Pack, StateOp};
 
 pub const EVENTS_PATH: &str = "state/events.jsonl";
 
@@ -205,14 +205,40 @@ pub fn check_envelope(lines: &[String]) -> CheckReport {
 /// `state/events.jsonl` (including their newlines).
 pub fn check_replay(repo: &Path, events: &[Event], raw_log: &str) -> CheckReport {
     let mut report = CheckReport::new(2, "replay");
-    if let Err(e) = replay(events) {
-        report.failures.push(format!("fold failed: {e}"));
-        return report;
+    // Fold exactly as a conformant runtime does, not more strictly.
+    //
+    // This check asks "can a conformant runtime fold and restore this store?".
+    // Since yoagent-state 0.5.1 the answer for a log containing an op that
+    // references a missing node is *yes* — the op is skipped and the fold
+    // completes. Failing here would report non-conformance for a store every
+    // runtime can restore, which inverts what the badge means.
+    //
+    // But the skip is not swallowed: an op the graph cannot represent is worth
+    // a reader's attention even when it is survivable, and a certificate that
+    // hides it is not auditable. It lands in `notes`, which does not fail the
+    // check.
+    match replay_with_diagnostics(events) {
+        Err(e) => {
+            report.failures.push(format!("fold failed: {e}"));
+            return report;
+        }
+        Ok((_graph, skipped)) => {
+            for s in &skipped {
+                // The reason already names the node, so do not repeat it.
+                report.notes.push(format!(
+                    "{} at batch index {} skipped — {}. The log is readable but malformed; a \
+                     conformant runtime folds past this, and so does this check",
+                    s.op, s.index, s.reason,
+                ));
+            }
+        }
     }
 
     let snapshots = repo.join("snapshots");
     if !snapshots.is_dir() {
-        report.notes.push("no snapshots/ — skipped seed check".into());
+        report
+            .notes
+            .push("no snapshots/ — skipped seed check".into());
         return report;
     }
     let entries = match std::fs::read_dir(&snapshots) {
@@ -252,14 +278,16 @@ pub fn check_replay(repo: &Path, events: &[Event], raw_log: &str) -> CheckReport
         let value: Value = match serde_json::from_str(&raw) {
             Ok(v) => v,
             Err(e) => {
-                report.failures.push(format!("snapshot {name}: not JSON: {e}"));
+                report
+                    .failures
+                    .push(format!("snapshot {name}: not JSON: {e}"));
                 continue;
             }
         };
         let (Some(graph_v), Some(integrity)) = (value.get("graph"), value.get("integrity")) else {
-            report
-                .failures
-                .push(format!("snapshot {name}: missing `graph` or `integrity` record"));
+            report.failures.push(format!(
+                "snapshot {name}: missing `graph` or `integrity` record"
+            ));
             continue;
         };
         let Some(line_count) = integrity.get("line_count").and_then(Value::as_u64) else {
@@ -269,9 +297,9 @@ pub fn check_replay(repo: &Path, events: &[Event], raw_log: &str) -> CheckReport
             continue;
         };
         let Some(expected_sha) = integrity.get("sha256").and_then(Value::as_str) else {
-            report
-                .failures
-                .push(format!("snapshot {name}: integrity record missing `sha256`"));
+            report.failures.push(format!(
+                "snapshot {name}: integrity record missing `sha256`"
+            ));
             continue;
         };
 
@@ -361,7 +389,11 @@ fn load_packs(repo: &Path) -> (Vec<Pack>, Vec<String>) {
         if path.extension().is_none_or(|x| x != "json") {
             continue;
         }
-        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         match std::fs::read_to_string(&path) {
             Ok(raw) => match serde_json::from_str::<Pack>(&raw) {
                 Ok(pack) => packs.push(pack),
@@ -468,7 +500,14 @@ pub fn check_append_only(repo: &Path) -> CheckReport {
     for path in &paths {
         let shas = match git(
             repo,
-            &["rev-list", "--reverse", "--full-history", "HEAD", "--", path],
+            &[
+                "rev-list",
+                "--reverse",
+                "--full-history",
+                "HEAD",
+                "--",
+                path,
+            ],
         ) {
             Ok(shas) => shas,
             Err(e) => {
@@ -602,9 +641,8 @@ pub fn check_restore(repo: &Path, events: &[Event], fixture_facts: bool) -> Chec
     }
 
     let node = |id: &str| graph.get_node(&yoagent_state::NodeId::new(id));
-    let prop = |id: &str, key: &str| -> Option<Value> {
-        node(id).and_then(|n| n.props.get(key)).cloned()
-    };
+    let prop =
+        |id: &str, key: &str| -> Option<Value> { node(id).and_then(|n| n.props.get(key)).cloned() };
     let edge = |from: &str, rel: &str, to: &str| -> bool {
         graph
             .outgoing(&yoagent_state::NodeId::new(from), Some(rel))
@@ -621,7 +659,9 @@ pub fn check_restore(repo: &Path, events: &[Event], fixture_facts: bool) -> Chec
             .push("fixture: patch_9 --advances--> goal_retry missing".into());
     }
     if prop("patch_9", "status") != Some(Value::from("Promoted")) {
-        report.failures.push("fixture: patch_9.status != Promoted".into());
+        report
+            .failures
+            .push("fixture: patch_9.status != Promoted".into());
     }
     if prop("patch_9", "references_commit") != Some(Value::from("abc1234")) {
         report
@@ -677,7 +717,10 @@ pub fn check_pairing(events: &[Event]) -> CheckReport {
                 .push(format!("line {n}: {} payload has no `id`", event.kind));
             continue;
         };
-        let claimants = ops_for.get(event.id.as_str()).map(Vec::as_slice).unwrap_or(&[]);
+        let claimants = ops_for
+            .get(event.id.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         if claimants.is_empty() {
             report.failures.push(format!(
                 "line {n}: {} `{entity_id}` has no paired state.ops_applied",
