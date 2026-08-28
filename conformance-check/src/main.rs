@@ -37,7 +37,7 @@ fn main() -> ExitCode {
     println!(
         "conformance-check {} — folding with yoagent-state {}",
         env!("CARGO_PKG_VERSION"),
-        env!("GASP_STATE_VERSION"),
+        yoagent_state::VERSION,
     );
 
     let mut failed = false;
