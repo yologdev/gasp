@@ -170,6 +170,10 @@ gasp restore <git-url> [--at <event-id>] [--model <model>]
 
 "Same agent, everywhere" = the same clone + fold on any machine. "Knows about you" = `identity/`, `memory/`, and the log's lineage all travel with the repo.
 
+### Optional task execution recovery
+
+Core restore recovers semantic agent state; it does not guarantee reconstruction of an executor conversation, uncommitted workspace, or in-flight tool execution. The optional [Task Execution Recovery extension](extensions/TASK_RECOVERY.md) defines task-scoped checkpoints, artifact integrity and retention, session versus semantic continuation, canonical publication and external-action reconciliation. It uses existing core vocabulary and leaves core v1 conformance unchanged. Its status is draft; runtime support must be demonstrated separately.
+
 ## Integration contract — wiring an existing agent in
 
 GASP governs state, not your executor. Keep your model, loop, prompts, and tools; route their state through GASP. Three additive steps — closer to adding OpenTelemetry than adopting a framework:

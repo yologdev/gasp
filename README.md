@@ -140,3 +140,5 @@ This is yoyo's actual `state/events.jsonl`, folded and rendered:
 The "log is the agent" idea descends from [Yohei Nakajima's ActiveGraph](https://github.com/yoheinakajima/activegraph); `yoagent-state` is an independent Rust implementation of it, and GASP binds that idea to git as the interchange substrate.
 
 [MIT](LICENSE)
+
+Task-scoped execution recovery is specified in the optional draft [Task Execution Recovery extension](extensions/TASK_RECOVERY.md). Core clone-and-fold restores semantic state; session/workspace continuation requires the additional adapter contract.
