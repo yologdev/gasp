@@ -60,6 +60,7 @@
   }
 </style>
 <!-- PostHog product analytics -->
+<script src="/activity-labels.js"></script>
 <script>
     !function(t,e){var o,n,p,r;e.__SV||(window.posthog && window.posthog.__loaded)||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split(".");2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement("script")).type="text/javascript",p.crossOrigin="anonymous",p.async=!0,p.src=s.api_host.replace(".i.posthog.com","-assets.i.posthog.com")+"/static/array.js",(r=t.getElementsByTagName("script")[0]).parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a="posthog",u.people=u.people||[],u.toString=function(t){var e="posthog";return"posthog"!==a&&(e+="."+a),t||(e+=" (stub)"),e},u.people.toString=function(){return u.toString(1)+".people (stub)"},o="ki Ci init qi Hi pr Bi zi Di capture calculateEventProperties Qi register register_once register_for_session unregister unregister_for_session Ki getFeatureFlag getFeatureFlagPayload getFeatureFlagResult getAllFeatureFlags isFeatureEnabled reloadFeatureFlags updateFlags updateEarlyAccessFeatureEnrollment getEarlyAccessFeatures on onFeatureFlags onSurveysLoaded onSessionId getSurveys getActiveMatchingSurveys renderSurvey displaySurvey cancelPendingSurvey canRenderSurvey canRenderSurveyAsync Xi identify setPersonProperties unsetPersonProperties group resetGroups setPersonPropertiesForFlags resetPersonPropertiesForFlags setGroupPropertiesForFlags resetGroupPropertiesForFlags reset shutdown setIdentity clearIdentity get_distinct_id getGroups get_session_id get_session_replay_url alias set_config startSessionRecording stopSessionRecording sessionRecordingStarted captureException addExceptionStep captureLog startExceptionAutocapture stopExceptionAutocapture loadToolbar get_property getSessionProperty Ji Gi createPersonProfile setInternalOrTestUser Yi Ai rn opt_in_capturing opt_out_capturing has_opted_in_capturing has_opted_out_capturing get_explicit_consent_status is_capturing clear_opt_in_out_capturing Vi debug mr it getPageViewId captureTraceFeedback captureTraceMetric Oi".split(" "),n=0;n<o.length;n++)g(u,o[n]);e._i.push([i,s,a])},e.__SV=1)}(document,window.posthog||[]);
     posthog.init('phc_l1jtx4tZRSCf0wcwuvPgC6fXGpyvOxus4bsqOS4BOI2', {
@@ -337,7 +338,7 @@
       var k = e.kind, p = e.payload || {};
       var run = e.correlation_id ? runs.get(e.correlation_id) : null;
       if (k === "state.ops_applied") stats.ops++;
-      else if (k === "run.started") { stats.runs++; runs.set(p.run_id, { id: p.run_id, task: p.task, ts: e.ts_ms, patches: new Map(), outcome: null }); }
+      else if (k === "run.started") { stats.runs++; runs.set(p.run_id, { id: p.run_id, task: p.task, ts: e.ts_ms, patches: new Map(), outcome: null, metadata: p.metadata || {} }); }
       else if (k === "run.finished") { var r = runs.get(p.run_id); if (r) r.outcome = p.outcome; }
       else if (k === "patch.proposed") { stats.patches++; if (run) run.patches.set(sfx(p.id), { title: p.title, eval: null, status: "Proposed", reason: null }); }
       else if (k === "eval.finished") { if (p.status === "Passed") stats.evalsPassed++; else stats.evalsFailed++; if (run) { var pa = run.patches.get(sfx(p.id)); if (pa) pa.eval = p.status; } }
@@ -346,6 +347,8 @@
     var lastTs = 0;
     evs.forEach(function (e) { if (e.ts_ms > lastTs) lastTs = e.ts_ms; });
     var runList = Array.from(runs.values()).sort(function (a, b) { return b.ts - a.ts; });
+    var labels = YoyoActivityLabels.index(evs);
+    runList.forEach(function (run) { run.display = YoyoActivityLabels.describe(run, labels); });
     return { stats: stats, lastTs: lastTs, runs: runList };
   }
 
@@ -402,12 +405,23 @@
       var row = el("div", { borderBottom: "1px solid var(--hair)", padding: "20px 8px" });
       row.addEventListener("mouseenter", tick);
       var head = el("div", { display: "flex", alignItems: "baseline", gap: "16px", flexWrap: "wrap" });
-      head.appendChild(el("span", { fontFamily: MONO, fontSize: "12px", color: "#7C6FF0", letterSpacing: "0.05em", minWidth: "72px" }, runLabel(r.id)));
+      head.appendChild(el("span", { fontFamily: MONO, fontSize: "12px", color: "#7C6FF0", letterSpacing: "0.05em", minWidth: "72px" }, r.display.category || runLabel(r.id)));
       head.appendChild(el("span", { fontFamily: MONO, fontSize: "12px", color: "var(--muted)" }, fmt(r.ts)));
-      head.appendChild(el("span", { fontSize: "16px", fontWeight: "600", letterSpacing: "-0.01em", flex: "1" }, r.task || ""));
+      head.appendChild(el("span", { fontSize: "16px", fontWeight: "600", letterSpacing: "-0.01em", flex: "1" }, r.display.title));
       var promoted = r.outcome && /promoted/.test(r.outcome);
-      head.appendChild(el("span", { fontFamily: MONO, fontSize: "11px", letterSpacing: "0.06em", color: promoted ? "#7C6FF0" : "var(--muted)" }, (r.outcome || "in progress").toUpperCase()));
+      head.appendChild(el("span", { fontFamily: MONO, fontSize: "11px", letterSpacing: "0.06em", color: promoted ? "#7C6FF0" : "var(--muted)" }, r.display.outcome.toUpperCase()));
       row.appendChild(head);
+      if (r.display.subtitle) row.appendChild(el("div", { fontSize: "14px", color: "var(--muted)", marginTop: "8px", lineHeight: "1.5" }, r.display.subtitle));
+      if (r.outcome === "checkpoint_saved") row.appendChild(el("div", { fontSize: "12px", color: "var(--muted)", marginTop: "8px" }, r.display.resumed ? "Task resumed · session saved for recovery" : "Session saved for recovery"));
+      if (r.display.url) {
+        var replyLink = el("a", { display: "inline-block", fontSize: "12px", marginTop: "8px", color: "#7C6FF0" }, "View tweet ↗");
+        replyLink.href = r.display.url; replyLink.target = "_blank"; replyLink.rel = "noopener noreferrer"; row.appendChild(replyLink);
+      }
+      var details = el("details", { marginTop: "10px", color: "var(--muted)", fontFamily: MONO, fontSize: "11px", overflowWrap: "anywhere" });
+      details.appendChild(el("summary", { cursor: "pointer", width: "fit-content" }, "Run details"));
+      details.appendChild(el("div", { marginTop: "8px", lineHeight: "1.6" }, "Run ID: " + r.id));
+      if (r.task) details.appendChild(el("div", { lineHeight: "1.6" }, "Task: " + r.task));
+      row.appendChild(details);
       var patches = Array.from(r.patches.values());
       if (patches.length) {
         var list = el("div", { display: "flex", flexDirection: "column", gap: "10px", marginTop: "14px", paddingLeft: "88px" });
