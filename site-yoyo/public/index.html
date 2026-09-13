@@ -385,12 +385,14 @@
   }
 
   var tabsEl = document.getElementById("log-tabs");
+  tabsEl.style.scrollMarginTop = "90px";
   var statsEl = document.getElementById("log-stats");
   var runsEl = document.getElementById("log-runs");
   var toggleEl = document.getElementById("runs-toggle");
   var srcEl = document.getElementById("log-src");
   var LIVE = null, BASE = null;
   var freshness = el("p", {fontFamily:MONO,fontSize:"11px",color:"var(--muted)"});statsEl.parentNode.insertBefore(freshness,statsEl);
+  var pendingFragment = location.hash.slice(1);
   var LOG = null, showRuns = 5, CAP = 35, activeTab = null;
 
   /* Tabs are built from whatever the log contains, never from a hardcoded list:
@@ -456,6 +458,7 @@
       b.addEventListener("click", function () {
         if (activeTab === t.id) return;
         activeTab = t.id;
+        history.pushState(null, "", "#"+t.id);
         showRuns = 5;
         renderTabs(); renderStats(1); renderRuns();
       });
@@ -615,6 +618,13 @@
     }, 30);
   }
 
+  function openFragment() {
+    if(!LOG || !pendingFragment || !tabsFor(LOG.runs).some(function(t){return t.id===pendingFragment;}))return;
+    activeTab=pendingFragment;pendingFragment=null;showRuns=5;
+    renderTabs();renderStats(1);renderRuns();
+    tabsEl.scrollIntoView({block:'start'});
+  }
+  window.addEventListener('hashchange',function(){pendingFragment=location.hash.slice(1);openFragment();});
   function loaded(text, src) {
     BASE = fold(text);LOG = {stats:BASE.stats,lastTs:BASE.lastTs,runs:YoyoActivityLive.merge(BASE.runs,LIVE)};
     // Open on evolution when it is there — that is the story this log has told
@@ -629,14 +639,14 @@
       srcEl.textContent = "SNAPSHOT · " + d.getUTCDate() + " " + MON[d.getUTCMonth()] + " " + d.getUTCFullYear() + " ↗";
     }
     startCount();
-    renderRuns();
+    renderRuns();openFragment();
   }
 
   function refreshLive(){
     return fetch('/api/activity',{cache:'no-store'}).then(function(r){if(!r.ok)throw Error('activity unavailable');return r.json();}).then(function(data){
       LIVE=data;
       freshness.textContent=(data.twitter?'X activity updated '+fmt(data.twitter.asOf)+'. ':'X activity unavailable; showing recorded history. ')+(data.treasury?'Treasury updated '+fmt(Date.parse(data.treasury.asOf))+'.':'Treasury unavailable; showing recorded history.')+' Refreshes every minute. Counts cover confirmed publications, not every incoming mention.';
-      if(BASE){LOG.runs=YoyoActivityLive.merge(BASE.runs,LIVE);renderTabs();renderStats(1);renderRuns();}
+      if(BASE){LOG.runs=YoyoActivityLive.merge(BASE.runs,LIVE);renderTabs();renderStats(1);renderRuns();openFragment();}
     }).catch(function(){freshness.textContent='Live activity unavailable. Displaying last known data; it may be out of date.';});
   }
   refreshLive();setInterval(function(){if(!document.hidden)refreshLive();},60000);
