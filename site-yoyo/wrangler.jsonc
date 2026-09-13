@@ -2,9 +2,29 @@
   "name": "yoyo-gasp-page",
   "compatibility_date": "2026-07-05",
   "assets": {
-    "directory": "./public"
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": [
+      "/api/*"
+    ]
   },
   "routes": [
-    { "pattern": "yoyo-gasp.yolog.dev", "custom_domain": true }
+    {
+      "pattern": "yoyo-gasp.yolog.dev",
+      "custom_domain": true
+    }
+  ],
+  "main": "worker.mjs",
+  "services": [
+    {
+      "binding": "TWITTER",
+      "service": "yoyo-cloudflare",
+      "entrypoint": "YoyoActivityReader"
+    },
+    {
+      "binding": "TREASURY",
+      "service": "yoyo-treasury",
+      "entrypoint": "YoyoTreasuryReader"
+    }
   ]
 }

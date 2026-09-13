@@ -1,0 +1,14 @@
+(function(root){
+ function number(raw,decimals){return Number(raw)/Math.pow(10,decimals);}
+ function format(n){return Number(n).toLocaleString('en-US',{maximumFractionDigits:6});}
+ function item(id,ts,group,title,subtitle,url,extra){return {id:id,ts:ts||0,task:'',metadata:{domain:group},patches:new Map(),outcome:'confirmed',group:group,display:Object.assign({title:title,subtitle:subtitle,url:url,group:group,category:group.toUpperCase(),outcome:'confirmed',isReply:false,isPost:false,linkLabel:'View transaction ↗'},extra||{})};}
+ function receipts(events){var found=[];events.forEach(function(e){var p=e.payload||{},m=p.metadata||{},r=m.receipt;
+  if(e.kind==='observation.created'&&m.domain==='treasury'&&m.producer==='yoyo-treasury'&&r&&r.failed===false&&/^[1-9A-HJ-NP-Za-km-z]{64,88}$/.test(r.signature||''))found.push(item('burn:'+r.signature,e.ts_ms,'treasury','YOYO bought and burned',format(number(r.burnUnits,6))+' YOYO burned · '+format(number(r.spentLamports,9))+' SOL including costs','https://solscan.io/tx/'+r.signature,{burn:true,burned:number(r.burnUnits,6),spent:number(r.spentLamports,9)}));
+ });return found;}
+ function merge(runs,live){var map=new Map();runs.forEach(function(r){var key=r.outcome!=='checkpoint_saved'&&r.display.tweetId?'tweet:'+r.display.tweetId:r.id;if(!map.has(key))map.set(key,r);});
+ if(live&&live.twitter)(live.twitter.items||[]).forEach(function(p){if(!/^\d+$/.test(p.tweetId))return;var group=p.kind==='burn'||p.kind==='funding'?'treasury':'twitter';var r=item('tweet:'+p.tweetId,p.at,group,p.replyTo?'Reply on X':p.kind==='funding'?'Creator-fee receipt posted':p.kind==='burn'?'Burn announcement posted':'Post on X',p.text,'https://x.com/yoyoevolve/status/'+p.tweetId,{tweetId:p.tweetId,isReply:!!p.replyTo,isPost:!p.replyTo,linkLabel:p.replyTo?'View conversation ↗':'View post ↗'});map.set(r.id,r);});
+ var t=live&&live.treasury;if(t){(t.burns||[]).forEach(function(b){if(!/^[1-9A-HJ-NP-Za-km-z]{64,88}$/.test(b.signature||''))return;var old=map.get('burn:'+b.signature);map.set('burn:'+b.signature,item('burn:'+b.signature,b.at||(old&&old.ts),'treasury','YOYO bought and burned',format(number(b.burnUnits,b.decimals))+' YOYO burned · '+format(number(b.spentLamports,9))+' SOL including costs','https://solscan.io/tx/'+b.signature,{burn:true,burned:number(b.burnUnits,b.decimals),spent:number(b.spentLamports,9)}));});
+ (t.funding||[]).forEach(function(f){if(!/^[1-9A-HJ-NP-Za-km-z]{64,88}$/.test(f.signature||''))return;map.set('funding:'+f.signature,item('funding:'+f.signature,f.at,'treasury','Creator fees received',format(number(f.lamports,9))+' SOL received · '+format(number(f.allocation,9))+' SOL allocated to buy-and-burn','https://solscan.io/tx/'+f.signature,{funding:true}));});}
+ return Array.from(map.values()).sort(function(a,b){return b.ts-a.ts;});}
+ root.YoyoActivityLive={receipts:receipts,merge:merge};
+})(typeof window==='undefined'?globalThis:window);

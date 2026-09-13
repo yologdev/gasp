@@ -51,6 +51,8 @@
     [/^run_(genesis|seed)/i, 'genesis']
   ];
   function group(run) {
+    if(/^task_treasury_/.test(String(run&&run.task||'')))return 'treasury';
+    if(/^task_twitter_/.test(String(run&&run.task||'')))return 'twitter';
     var md = (run && run.metadata) || {};
     var declared = clean(md.channel, 40) || clean(md.domain, 40);
     if (declared) {
@@ -90,8 +92,9 @@
     }
     return {title: title, subtitle: subtitle, url: url,
       group: group(run),
-      isReply: Boolean(receipt && receipt.action && receipt.action.reply_to),
-      isPost: Boolean(receipt && !(receipt.action && receipt.action.reply_to)),
+      tweetId: receipt && /^\d+$/.test(receipt.tweet_id || '') ? receipt.tweet_id : null,
+      isReply: Boolean(run.outcome !== 'checkpoint_saved' && receipt && receipt.action && receipt.action.reply_to),
+      isPost: Boolean(run.outcome !== 'checkpoint_saved' && receipt && !(receipt.action && receipt.action.reply_to)),
       category: match || receipt ? 'TWITTER' : /^task_/.test(task) ? 'TASK' : null,
       outcome: run.outcome === 'checkpoint_saved' ? 'Checkpoint saved' : String(run.outcome || 'in progress').replace(/_/g, ' '),
       resumed: Boolean(run.metadata && run.metadata.parent_checkpoint_id)};
