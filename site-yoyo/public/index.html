@@ -183,6 +183,7 @@
         <div style="margin-top:8px; color:#7FD9A6;">patch &#8594; Promoted &#10003;</div>
       </div>
     </div>
+    <div id="log-tabs" style="display:flex; gap:10px; flex-wrap:wrap; padding-top:28px;"></div>
     <div id="log-stats"></div>
     <div id="log-runs"></div>
     <div id="runs-toggle" style="display:flex; gap:28px; flex-wrap:wrap;"></div>
@@ -348,7 +349,10 @@
     evs.forEach(function (e) { if (e.ts_ms > lastTs) lastTs = e.ts_ms; });
     var runList = Array.from(runs.values()).sort(function (a, b) { return b.ts - a.ts; });
     var labels = YoyoActivityLabels.index(evs);
-    runList.forEach(function (run) { run.display = YoyoActivityLabels.describe(run, labels); });
+    runList.forEach(function (run) {
+      run.display = YoyoActivityLabels.describe(run, labels);
+      run.group = run.display.group;
+    });
     return { stats: stats, lastTs: lastTs, runs: runList };
   }
 
@@ -379,18 +383,82 @@
     }, label);
   }
 
+  var tabsEl = document.getElementById("log-tabs");
   var statsEl = document.getElementById("log-stats");
   var runsEl = document.getElementById("log-runs");
   var toggleEl = document.getElementById("runs-toggle");
   var srcEl = document.getElementById("log-src");
-  var LOG = null, showRuns = 5, CAP = 35;
+  var LOG = null, showRuns = 5, CAP = 35, activeTab = null;
+
+  /* Tabs are built from whatever the log contains, never from a hardcoded list:
+     a category yoyo starts emitting tomorrow appears by itself. PRIORITY only
+     orders the ones we know about — anything else is appended alphabetically
+     rather than hidden. */
+  var TAB_PRIORITY = ["evolve", "twitter", "social", "skill", "dream", "task", "genesis"];
+
+  function tabsFor(runs) {
+    var counts = {};
+    runs.forEach(function (r) { counts[r.group] = (counts[r.group] || 0) + 1; });
+    var ids = Object.keys(counts);
+    ids.sort(function (a, b) {
+      var ia = TAB_PRIORITY.indexOf(a), ib = TAB_PRIORITY.indexOf(b);
+      if (ia === -1 && ib === -1) return a < b ? -1 : 1;
+      if (ia === -1) return 1;
+      if (ib === -1) return -1;
+      return ia - ib;
+    });
+    return ids.map(function (id) { return { id: id, count: counts[id] }; });
+  }
+
+  function visibleRuns() {
+    return LOG.runs.filter(function (r) { return r.group === activeTab; });
+  }
+
+  /* Counters describe the selected category. EVENTS/OPS stay on every tab
+     because they are properties of the log itself, not of a category —
+     labelling them per-tab would claim a split that does not exist. */
+  function statsFor(runs) {
+    var patches = 0, promoted = 0, rejected = 0, replies = 0, posts = 0;
+    runs.forEach(function (r) {
+      Array.from(r.patches.values()).forEach(function (p) {
+        patches++;
+        if (p.status === "Promoted") promoted++;
+        if (p.status === "Rejected") rejected++;
+      });
+      if (r.display.isReply) replies++;
+      if (r.display.isPost) posts++;
+    });
+    var base = [[LOG.stats.events, "EVENTS APPENDED"], [LOG.stats.ops, "OPS FOLDED"]];
+    if (patches) return base.concat([[runs.length, "RUNS"], [patches, "PATCHES"], [promoted, "PROMOTED"], [rejected, "REVERTED"]]);
+    if (replies || posts) return base.concat([[runs.length, "RUNS"], [replies, "REPLIES"], [posts, "POSTS"]]);
+    return base.concat([[runs.length, "RUNS"]]);
+  }
+
+  function renderTabs() {
+    tabsEl.textContent = "";
+    tabsFor(LOG.runs).forEach(function (t) {
+      var on = t.id === activeTab;
+      var b = document.createElement("button");
+      b.className = "toggle-btn";
+      b.style.color = on ? "#7C6FF0" : "var(--muted)";
+      b.style.borderColor = on ? "#7C6FF0" : "var(--hair)";
+      b.textContent = YoyoActivityLabels.groupLabel(t.id) + " (" + t.count + ")";
+      b.addEventListener("mouseenter", tick);
+      b.addEventListener("click", function () {
+        if (activeTab === t.id) return;
+        activeTab = t.id;
+        showRuns = 5;
+        renderTabs(); renderStats(1); renderRuns();
+      });
+      tabsEl.appendChild(b);
+    });
+  }
 
   function renderStats(t) {
     statsEl.textContent = "";
     var ease = 1 - Math.pow(1 - t, 3);
     var grid = el("div", { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: "16px", padding: "30px 0 10px", borderBottom: "1px solid var(--hair)" });
-    var s = LOG.stats;
-    [[s.events, "EVENTS APPENDED"], [s.ops, "OPS FOLDED"], [s.runs, "RUNS"], [s.patches, "PATCHES"], [s.promoted, "PROMOTED"], [s.rejected, "REVERTED"]].forEach(function (pair) {
+    statsFor(visibleRuns()).forEach(function (pair) {
       var box = el("div");
       box.appendChild(el("div", { fontSize: "40px", fontWeight: "700", letterSpacing: "-0.03em", fontVariantNumeric: "tabular-nums" }, String(Math.round(pair[0] * ease))));
       box.appendChild(el("div", { fontFamily: MONO, fontSize: "11px", letterSpacing: "0.08em", color: "var(--muted)", marginTop: "4px" }, pair[1]));
@@ -399,9 +467,52 @@
     statsEl.appendChild(grid);
   }
 
+  /* Checkpoints are recovery bookkeeping, not activity. Left expanded they bury
+     the day's actual work — eight identical "session saved for recovery" rows
+     between one shipped task and the next. Consecutive ones fold into a single
+     line that still says how many and when, and open on click. */
+  function foldCheckpoints(runs) {
+    var out = [];
+    runs.forEach(function (r) {
+      var last = out[out.length - 1];
+      if (r.outcome === "checkpoint_saved" && last && last.checkpoint) {
+        last.runs.push(r);
+      } else if (r.outcome === "checkpoint_saved") {
+        out.push({ checkpoint: true, runs: [r] });
+      } else {
+        out.push({ checkpoint: false, run: r });
+      }
+    });
+    return out;
+  }
+
+  function renderCheckpointGroup(group) {
+    var runs = group.runs;
+    var row = el("div", { borderBottom: "1px solid var(--hair)", padding: "16px 8px" });
+    var head = el("div", { display: "flex", alignItems: "baseline", gap: "16px", flexWrap: "wrap" });
+    head.appendChild(el("span", { fontFamily: MONO, fontSize: "12px", color: "var(--muted)", letterSpacing: "0.05em", minWidth: "72px" }, "CHECKPOINT"));
+    var newest = runs[0].ts, oldest = runs[runs.length - 1].ts;
+    head.appendChild(el("span", { fontFamily: MONO, fontSize: "12px", color: "var(--muted)" },
+      runs.length > 1 ? fmt(oldest) + " – " + fmt(newest) : fmt(newest)));
+    head.appendChild(el("span", { fontSize: "14px", color: "var(--muted)", flex: "1" },
+      runs.length === 1 ? "1 session saved for recovery" : runs.length + " sessions saved for recovery"));
+    row.appendChild(head);
+    var details = el("details", { marginTop: "8px", color: "var(--muted)", fontFamily: MONO, fontSize: "11px", overflowWrap: "anywhere" });
+    details.appendChild(el("summary", { cursor: "pointer", width: "fit-content" }, "Show checkpoints"));
+    runs.forEach(function (r) {
+      details.appendChild(el("div", { marginTop: "6px", lineHeight: "1.6" },
+        fmt(r.ts) + " · " + (r.display.title || r.id) + (r.display.resumed ? " · resumed" : "")));
+    });
+    row.appendChild(details);
+    return row;
+  }
+
   function renderRuns() {
     runsEl.textContent = "";
-    LOG.runs.slice(0, showRuns).forEach(function (r) {
+    foldCheckpoints(visibleRuns().slice(0, showRuns)).forEach(function (entry) {
+      if (entry.checkpoint) { runsEl.appendChild(renderCheckpointGroup(entry)); return; }
+      var r = entry.run;
+      (function (r) {
       var row = el("div", { borderBottom: "1px solid var(--hair)", padding: "20px 8px" });
       row.addEventListener("mouseenter", tick);
       var head = el("div", { display: "flex", alignItems: "baseline", gap: "16px", flexWrap: "wrap" });
@@ -440,6 +551,7 @@
         row.appendChild(list);
       }
       runsEl.appendChild(row);
+      })(r);
     });
     renderToggle();
   }
@@ -456,13 +568,14 @@
 
   function renderToggle() {
     toggleEl.textContent = "";
-    if (LOG.runs.length > showRuns && showRuns < CAP) {
-      toggleEl.appendChild(toggleBtn("SHOW 10 MORE ↓ (" + (LOG.runs.length - showRuns) + " OLDER)", null, function () {
+    var shown = visibleRuns();
+    if (shown.length > showRuns && showRuns < CAP) {
+      toggleEl.appendChild(toggleBtn("SHOW 10 MORE ↓ (" + (shown.length - showRuns) + " OLDER)", null, function () {
         showRuns = Math.min(showRuns + 10, CAP);
         renderRuns();
       }));
     }
-    if (LOG.runs.length > CAP && showRuns >= CAP) {
+    if (shown.length > CAP && showRuns >= CAP) {
       var a = document.createElement("a");
       a.className = "toggle-btn";
       a.style.textDecoration = "none";
@@ -492,6 +605,11 @@
 
   function loaded(text, src) {
     LOG = fold(text);
+    // Open on evolution when it is there — that is the story this log has told
+    // for 180 days — otherwise on whatever the highest-priority category is.
+    var tabs = tabsFor(LOG.runs);
+    activeTab = (tabs.filter(function (t) { return t.id === "evolve"; })[0] || tabs[0] || {}).id || null;
+    renderTabs();
     if (src === "live") {
       srcEl.textContent = "FETCHED LIVE FROM MAIN ↗";
     } else {

@@ -35,6 +35,43 @@
     });
     return {tasks: tasks, social: social};
   }
+  /* Which tab a run belongs to.
+     The stream declares this now: runs carry metadata.domain / metadata.channel
+     (e.g. {domain:'social', channel:'twitter', producer:'yoyo-cloudflare'}).
+     Read it. Older runs, recorded before that metadata existed, are identified
+     by their id prefix — a closed set that stops growing the moment yoyo emits
+     metadata on every run, at which point this map is frozen history.
+     An unrecognised category is never dropped; it gets its own tab. */
+  var GROUP_ALIASES = {'cloudflare-task': 'task'};
+  var LEGACY_PREFIX = [
+    [/^run_social_day/i, 'social'],
+    [/^run_skill_day/i, 'skill'],
+    [/^run_dream_day/i, 'dream'],
+    [/^run_day\d+/i, 'evolve'],
+    [/^run_(genesis|seed)/i, 'genesis']
+  ];
+  function group(run) {
+    var md = (run && run.metadata) || {};
+    var declared = clean(md.channel, 40) || clean(md.domain, 40);
+    if (declared) {
+      var key = declared.toLowerCase().replace(/[^a-z0-9-]/g, '');
+      return GROUP_ALIASES[key] || key || 'other';
+    }
+    var id = String((run && run.id) || '');
+    for (var i = 0; i < LEGACY_PREFIX.length; i++) {
+      if (LEGACY_PREFIX[i][0].test(id)) return LEGACY_PREFIX[i][1];
+    }
+    return 'other';
+  }
+
+  var GROUP_LABELS = {
+    evolve: 'EVOLUTION', twitter: 'TWITTER', social: 'SOCIAL', skill: 'SKILL',
+    dream: 'DREAM', task: 'TASK', genesis: 'GENESIS', other: 'OTHER'
+  };
+  function groupLabel(id) {
+    return GROUP_LABELS[id] || String(id || 'other').toUpperCase().replace(/-/g, ' ');
+  }
+
   function describe(run, lookup) {
     var task = String(run.task || ''), props = lookup.tasks.get(task) || {};
     var match = /^task_twitter_(.+)_\d+$/.exec(task);
@@ -52,9 +89,12 @@
       if (/^\d+$/.test(receipt.tweet_id || '')) url = 'https://x.com/yoyoevolve/status/' + receipt.tweet_id;
     }
     return {title: title, subtitle: subtitle, url: url,
+      group: group(run),
+      isReply: Boolean(receipt && receipt.action && receipt.action.reply_to),
+      isPost: Boolean(receipt && !(receipt.action && receipt.action.reply_to)),
       category: match || receipt ? 'TWITTER' : /^task_/.test(task) ? 'TASK' : null,
       outcome: run.outcome === 'checkpoint_saved' ? 'Checkpoint saved' : String(run.outcome || 'in progress').replace(/_/g, ' '),
       resumed: Boolean(run.metadata && run.metadata.parent_checkpoint_id)};
   }
-  root.YoyoActivityLabels = {index: index, describe: describe};
+  root.YoyoActivityLabels = {index: index, describe: describe, group: group, groupLabel: groupLabel};
 })(typeof window === 'undefined' ? globalThis : window);
