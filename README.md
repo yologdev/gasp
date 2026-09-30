@@ -124,6 +124,7 @@ This is yoyo's actual `state/events.jsonl`, folded and rendered:
 ## Extensions
 
 - **[Permanence](extensions/PERMANENCE.md)** (draft) — durable, retrievable, owned agent state beyond any single host: encrypted payloads on Arweave (pay-once, ~$0.05), P2P redundancy via Radicle, and free Bitcoin-anchored provenance via OpenTimestamps. Optional; core conformance does not require it. Open thinking — feedback welcome.
+- **[Person and Multimodal Memory](extensions/PERSON_MEMORY.md)** (draft) — optional, sourced and correctable memory about people and characters across conversations and media. Keeps private payloads outside public GASP state; core conformance does not require it.
 
 ## Ecosystem
 
