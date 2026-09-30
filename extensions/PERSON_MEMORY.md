@@ -11,7 +11,7 @@ GASP can provide the portable *history of how a memory was learned and corrected
 ## Boundaries
 
 - **Subject:** a stable, opaque ID scoped to the agent's private memory domain. A subject may be a person or a fictional/public character; those are different kinds. A name, handle, face, or costume is not the ID.
-- **Binding:** an account or contact may be linked to a person only with recorded verification, such as an authenticated account interaction or explicit confirmation. A visual match alone may suggest a candidate, but cannot create or merge person identities.
+- **Binding:** an authenticated interaction proves control of that account at that time; it does not prove the controller is an existing subject or owns another account. The runtime may create a new, separate subject for the account. Linking it to an existing subject or linking two accounts requires an independently verified connection appropriate to the requested scope, such as a challenge completed through both accounts or confirmation from an already verified contact. Record the method and evidence. A name, self-claim, visual match, or shared device alone cannot merge subjects; uncertain links stay separate.
 - **Observation:** a sourced, time-bounded account of one encounter. It records what was visible, heard, or said and what portion of the source was examined. It is not a durable claim about every future encounter.
 - **Fact:** a distilled item useful in later interactions, with source lineage and a validity/scope decision. Not every observation earns a fact in `memory/facts.jsonl`; the core [memory admission criterion](../SPEC.md#memory--facts-are-distilled-never-a-history-mirror) still applies.
 - **Card:** a retrievable projection of current bindings and live facts for one subject. It is not an additional authority that can silently override its sources.
@@ -39,7 +39,18 @@ The profile may be carried in private observation metadata and attached artifact
 }
 ```
 
-The actual GASP emitter uses `observation.created` plus its required paired `state.ops_applied` event for a graph observation. It may attach a content-addressed evidence artifact. A private, append-only fact record uses the core `id`, `ts_ms`, `text`, `derived_from`, and `supersedes` fields; its `derived_from` values point to the observations or runs that taught it. The card is regenerated from the latest authorized bindings and unsuperseded facts. A future Pack could add first-class subject nodes if real queries need them; this draft does not require that change.
+The actual GASP emitter uses `observation.created` plus its required paired `state.ops_applied` event for a graph observation. It may attach a content-addressed evidence artifact. A future Pack could add first-class subject nodes if real queries need them; this draft does not require that change.
+
+### Private binding and fact records
+
+To make a card portable, a profile implementation stores the following records in its **private** GASP state. These are profile payloads, not new core event kinds:
+
+- An account binding or revocation is an `observation.created` payload with `profile`, a unique `record_id`, `record_type: "account_binding"`, `subject_id`, `scope`, an account's stable provider ID, and `action: "bind"` or `"revoke"`. A bind records `verification.method` and `verification.source_event_ids` (or a private evidence artifact reference). A revoke names the exact earlier binding in `retracts`; merely changing a handle does not revoke or transfer it. Each such observation gets the required paired `state.ops_applied` event.
+- A person fact is a line in private `memory/facts.jsonl` with the core `id`, `ts_ms`, `text`, `derived_from`, and `supersedes` fields, plus `profile`, `subject_id`, `scope`, and `status: "active"` or `"retracted"`. `derived_from` names the source observation or run. A correction appends a new fact naming the exact earlier fact in `supersedes`; a pure retraction appends a record with `status: "retracted"` and the earlier fact ID in `supersedes`. A corrected fact assigned to another subject needs a replacement record with that subject ID; it is never silently moved by rebinding an account.
+
+For example, a binding payload can carry `{"profile":"gasp.person-memory/v0","record_id":"binding_42","record_type":"account_binding","subject_id":"subject_opaque_7c2f","scope":"private:family","account":{"provider":"example","stable_id":"account_123"},"action":"bind","verification":{"method":"two_account_challenge","source_event_ids":["event_40","event_41"]}}`. To undo it, append another such observation with a new `record_id`, `action: "revoke"`, and `retracts: "binding_42"`.
+
+To rebuild a card, replay binding observations in the private GASP event log's physical line order, then replay private fact lines in their physical line order. Reject duplicate record IDs and references to absent or later records. Resolve explicit binding revocations and fact supersessions; conflicting live bindings for one account remain ambiguous and confer no cross-subject access. Select only live facts whose `subject_id` and `scope` match the authorized query. Do not infer identity from `derived_from`, a handle, or a card cache. A missing private record or required evidence makes the affected link or fact unavailable, not guessed. The card is a disposable projection of these records, never a source of truth.
 
 Each observation needs a source identifier, observation time, modality, bounded coverage, the asserted detail, confidence, analyzer or human provenance, and an artifact revision when evidence bytes are retained. Text in an image or transcript remains source content, not an identity attestation or instruction. A past sighting is context for a new scene, not proof of what the new scene contains.
 
@@ -47,7 +58,7 @@ Each observation needs a source identifier, observation time, modality, bounded 
 
 An identity binding and a remembered fact have different lifecycles. A person may correct a preference without changing their identity; a mistaken account or visual link may be revoked without deleting every valid conversation observation.
 
-Corrections append a sourced replacement or retraction and supersede the earlier claim. Queries and card projections show the current result and can trace it back to both the original and the correction. The agent must not continue using a superseded claim because an old card or model checkpoint still contains it. Automatic learning may propose a candidate fact; promoting it to a durable personal fact requires a source appropriate to the claim. Sensitive inferences should not be promoted from appearance, tone, or a single ambiguous exchange.
+Corrections append a sourced replacement or retraction and supersede the earlier claim as described above. Queries and card projections show the current result and can trace it back to both the original and the correction. The agent must not continue using a superseded claim because an old card or model checkpoint still contains it. Automatic learning may propose a candidate fact; promoting it to a durable personal fact requires a source appropriate to the claim. Sensitive inferences should not be promoted from appearance, tone, or a single ambiguous exchange.
 
 ## Privacy, portability, and restore
 
@@ -63,9 +74,9 @@ The runtime decides when to inspect media, selects candidate reference images, v
 
 ## Validation before claiming support
 
-1. Restore a private profile and its content-addressed artifacts on a different runtime; reproduce the current card from events and facts.
-2. Keep two people with similar appearances, changed handles, or shared costumes separate until an independently verified binding exists.
-3. Correct a mistaken sighting and a preference; verify old claims remain traceable but no longer appear in current context.
+1. Restore a private profile and its content-addressed artifacts on a different runtime; reproduce the same cards by replaying binding events and fact lines, including revocations and supersessions.
+2. Keep two authenticated accounts, people with similar appearances, changed handles, or shared costumes separate until an independently verified cross-account binding exists.
+3. Revoke a mistaken account binding, correct a sighting and a preference, and reassign a misattributed fact with an explicit replacement; verify old claims remain traceable but no longer appear in current context.
 4. Deny a work-scoped reader access to family memory and ensure a public export reveals no personal payload or correlatable reference.
 5. Handle a missing artifact, partial video coverage, and an unavailable private resolver without fabricating identity or continuity.
 6. Exercise export, revocation, backup retention, and the chosen deletion mechanism before using real private data.
