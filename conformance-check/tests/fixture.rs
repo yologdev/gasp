@@ -429,6 +429,95 @@ fn restore_asserts_fixture_facts() {
     );
 }
 
+/// Rewrite the manifest's identity_hash line: `Some(digest)` replaces it,
+/// `None` removes it.
+fn set_manifest_identity_hash(repo: &Path, digest: Option<&str>) {
+    let manifest = std::fs::read_to_string(repo.join("AGENT.md")).unwrap();
+    let rewritten: Vec<String> = manifest
+        .lines()
+        .filter_map(|l| {
+            if l.trim_start().starts_with("identity_hash:") {
+                digest.map(|d| format!("identity_hash: {d}"))
+            } else {
+                Some(l.to_string())
+            }
+        })
+        .collect();
+    std::fs::write(repo.join("AGENT.md"), rewritten.join("\n") + "\n").unwrap();
+}
+
+#[test]
+fn restore_verifies_the_fixture_identity_hash() {
+    let events = parse_events(&fixture_lines()).unwrap();
+    let report = check_restore(&fixture_dir(), &events, false);
+    assert!(report.passed(), "{report:?}");
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|n| n.contains("identity hash verified")),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn restore_rejects_tampered_identity_bytes() {
+    let dir = fixture_in_temp_git();
+    let repo = dir.path().join("repo");
+    let id = repo.join("identity/IDENTITY.md");
+    let mut bytes = std::fs::read(&id).unwrap();
+    bytes.extend_from_slice(b"\nsynthetic-tamper\n");
+    std::fs::write(&id, bytes).unwrap();
+    let events = parse_events(&fixture_lines()).unwrap();
+    let report = check_restore(&repo, &events, false);
+    assert!(
+        fails_with(&report, "identity bytes do not match the manifest"),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn restore_rejects_malformed_identity_hash() {
+    let dir = fixture_in_temp_git();
+    let repo = dir.path().join("repo");
+    set_manifest_identity_hash(&repo, Some("not-a-digest"));
+    let events = parse_events(&fixture_lines()).unwrap();
+    let report = check_restore(&repo, &events, false);
+    assert!(fails_with(&report, "malformed"), "{report:?}");
+}
+
+#[test]
+fn restore_missing_identity_hash_is_a_note_for_now() {
+    // Staged rollout: reference emitters do not write digests yet, so a
+    // missing digest warns instead of failing. Flip this test when the
+    // emitter release is consumed and missing digests fail closed.
+    let dir = fixture_in_temp_git();
+    let repo = dir.path().join("repo");
+    set_manifest_identity_hash(&repo, None);
+    let events = parse_events(&fixture_lines()).unwrap();
+    let report = check_restore(&repo, &events, false);
+    assert!(report.passed(), "{report:?}");
+    assert!(
+        report.notes.iter().any(|n| n.contains("no identity_hash")),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn identity_hash_recipe_covers_all_files_in_byte_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    std::fs::create_dir_all(repo.join("identity/sub")).unwrap();
+    std::fs::write(repo.join("identity/b.md"), "bee").unwrap();
+    std::fs::write(repo.join("identity/sub/a.md"), "ay").unwrap();
+    // Independent restatement of the recipe as one concatenated stream:
+    // path, newline, bytes — "identity/b.md" sorts before "identity/sub/a.md".
+    let expected = hex(&sha2::Sha256::digest(
+        b"identity/b.md\nbeeidentity/sub/a.md\nay",
+    ));
+    assert_eq!(compute_identity_hash(repo).unwrap(), expected);
+}
+
 // ---- check 7: pairing ----
 
 #[test]

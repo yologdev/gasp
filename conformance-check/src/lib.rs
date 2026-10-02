@@ -613,10 +613,83 @@ pub fn check_causation(events: &[Event]) -> CheckReport {
     report
 }
 
+/// The Part I identity-hash recipe (commit rule 4): SHA-256 over each
+/// identity file's relative path followed by a newline and its bytes, in
+/// byte-order-sorted path order — the same stream `find identity -type f |
+/// LC_ALL=C sort | while read f; do printf '%s\n' "$f"; cat "$f"; done`
+/// produces. Falls back to a root `IDENTITY.md` when there is no `identity/`.
+pub fn compute_identity_hash(repo: &Path) -> Result<String, String> {
+    let mut files: Vec<String> = Vec::new();
+    let identity_dir = repo.join("identity");
+    if identity_dir.is_dir() {
+        collect_identity_files(repo, &identity_dir, &mut files)?;
+    } else if repo.join("IDENTITY.md").is_file() {
+        files.push("IDENTITY.md".into());
+    } else {
+        return Err("no identity/ directory or IDENTITY.md".into());
+    }
+    files.sort_unstable(); // String order is byte order — LC_ALL=C sort
+    let mut hasher = Sha256::new();
+    for rel in &files {
+        hasher.update(rel.as_bytes());
+        hasher.update(b"\n");
+        let bytes = std::fs::read(repo.join(rel)).map_err(|e| format!("cannot read {rel}: {e}"))?;
+        hasher.update(&bytes);
+    }
+    Ok(hex(&hasher.finalize()))
+}
+
+fn collect_identity_files(repo: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+    for entry in entries {
+        let path = entry
+            .map_err(|e| format!("cannot read {}: {e}", dir.display()))?
+            .path();
+        if path.is_dir() {
+            collect_identity_files(repo, &path, out)?;
+        } else {
+            let rel = path
+                .strip_prefix(repo)
+                .map_err(|_| format!("{} escapes the repo root", path.display()))?
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/");
+            out.push(rel);
+        }
+    }
+    Ok(())
+}
+
+/// `identity_hash:` from the manifest's first fenced code block (the YAML
+/// envelope). Later fences are prose/examples and are not the manifest.
+fn manifest_identity_hash(agent_md: &str) -> Option<String> {
+    let mut in_fence = false;
+    for line in agent_md.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            if in_fence {
+                break;
+            }
+            in_fence = true;
+            continue;
+        }
+        if in_fence {
+            if let Some(rest) = trimmed.strip_prefix("identity_hash:") {
+                return Some(rest.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Check 6 — restore: the manifest and identity are present at their default
-/// locations and the log folds. With `fixture_facts`, additionally asserts the
-/// Part VI fixture graph. (Manifest-declared alternate locations are not yet
-/// mechanically checked.)
+/// locations, a declared identity hash verifies against the identity bytes
+/// (fail-closed; a manifest with no digest is a note until reference emitters
+/// ship digests), and the log folds. With `fixture_facts`, additionally
+/// asserts the Part VI fixture graph. (Manifest-declared alternate locations
+/// and skills loading are not yet mechanically checked.)
 pub fn check_restore(repo: &Path, events: &[Event], fixture_facts: bool) -> CheckReport {
     let mut report = CheckReport::new(6, "restore");
     if !repo.join("AGENT.md").is_file() {
@@ -628,6 +701,43 @@ pub fn check_restore(repo: &Path, events: &[Event], fixture_facts: bool) -> Chec
             "no identity/ directory or IDENTITY.md (manifest-declared alternate locations are not yet checked)"
                 .into(),
         );
+    }
+    // Restore step 2: the identity bytes must match the manifest's declared
+    // hash, or restore is reconstructing someone else. Mismatched or
+    // malformed digests fail closed; a missing digest is a note for now
+    // (staged — it becomes a failure once the reference emitter writes
+    // digests at init) so the checker and emitter can release independently.
+    if identity_ok {
+        if let Ok(manifest) = std::fs::read_to_string(repo.join("AGENT.md")) {
+            match manifest_identity_hash(&manifest) {
+                Some(declared) => {
+                    let declared = declared.to_ascii_lowercase();
+                    if declared.len() != 64 || !declared.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        report.failures.push(format!(
+                            "AGENT.md identity_hash is malformed: `{declared}` is not 64 hex chars"
+                        ));
+                    } else {
+                        match compute_identity_hash(repo) {
+                            Ok(computed) if computed == declared => report
+                                .notes
+                                .push("identity hash verified against identity bytes".into()),
+                            Ok(computed) => report.failures.push(format!(
+                                "identity bytes do not match the manifest: declared {declared}, computed {computed} \
+                                 (commit rule 4 — an identity edit must update the hash in the same human-gated commit)"
+                            )),
+                            Err(e) => report
+                                .failures
+                                .push(format!("cannot compute identity hash: {e}")),
+                        }
+                    }
+                }
+                None => report.notes.push(
+                    "AGENT.md declares no identity_hash — identity integrity is unverified; \
+                     this becomes a failure once reference emitters write digests at init"
+                        .into(),
+                ),
+            }
+        }
     }
     let graph = match replay(events) {
         Ok(g) => g,
