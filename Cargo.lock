@@ -85,7 +85,7 @@ dependencies = [
 
 [[package]]
 name = "conformance-check"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -603,14 +603,15 @@ dependencies = [
 
 [[package]]
 name = "yoagent-state"
-version = "0.5.2"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2dd8927d9d65826f646e7a674064904baa56f10b485301b91a65652b50c6ca32"
+checksum = "8e88f1cb3eb24a0852273ad3c0a591609c5c4e0cfa348ce467349bb0e88182ae"
 dependencies = [
  "async-trait",
  "chrono",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
  "tokio",
  "uuid",

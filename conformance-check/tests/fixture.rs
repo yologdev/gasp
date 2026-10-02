@@ -487,18 +487,16 @@ fn restore_rejects_malformed_identity_hash() {
 }
 
 #[test]
-fn restore_missing_identity_hash_is_a_note_for_now() {
-    // Staged rollout: reference emitters do not write digests yet, so a
-    // missing digest warns instead of failing. Flip this test when the
-    // emitter release is consumed and missing digests fail closed.
+fn restore_rejects_missing_identity_hash() {
+    // Was a note while the reference emitter predated digests; yoagent-state
+    // 0.5.3 writes them at init, so an undeclared digest now fails closed.
     let dir = fixture_in_temp_git();
     let repo = dir.path().join("repo");
     set_manifest_identity_hash(&repo, None);
     let events = parse_events(&fixture_lines()).unwrap();
     let report = check_restore(&repo, &events, false);
-    assert!(report.passed(), "{report:?}");
     assert!(
-        report.notes.iter().any(|n| n.contains("no identity_hash")),
+        fails_with(&report, "declares no identity_hash"),
         "{report:?}"
     );
 }

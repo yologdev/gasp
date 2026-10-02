@@ -685,11 +685,11 @@ fn manifest_identity_hash(agent_md: &str) -> Option<String> {
 }
 
 /// Check 6 — restore: the manifest and identity are present at their default
-/// locations, a declared identity hash verifies against the identity bytes
-/// (fail-closed; a manifest with no digest is a note until reference emitters
-/// ship digests), and the log folds. With `fixture_facts`, additionally
-/// asserts the Part VI fixture graph. (Manifest-declared alternate locations
-/// and skills loading are not yet mechanically checked.)
+/// locations, the manifest's identity hash verifies against the identity
+/// bytes (fail-closed: missing, malformed, and mismatched all fail), and the
+/// log folds. With `fixture_facts`, additionally asserts the Part VI fixture
+/// graph. (Manifest-declared alternate locations and skills loading are not
+/// yet mechanically checked.)
 pub fn check_restore(repo: &Path, events: &[Event], fixture_facts: bool) -> CheckReport {
     let mut report = CheckReport::new(6, "restore");
     if !repo.join("AGENT.md").is_file() {
@@ -703,10 +703,10 @@ pub fn check_restore(repo: &Path, events: &[Event], fixture_facts: bool) -> Chec
         );
     }
     // Restore step 2: the identity bytes must match the manifest's declared
-    // hash, or restore is reconstructing someone else. Mismatched or
-    // malformed digests fail closed; a missing digest is a note for now
-    // (staged — it becomes a failure once the reference emitter writes
-    // digests at init) so the checker and emitter can release independently.
+    // hash, or restore is reconstructing someone else. Fail-closed on every
+    // arm — missing, malformed, and mismatched digests all fail. (Missing
+    // was a note while the reference emitter predated digests; yoagent-state
+    // 0.5.3 writes them at init, so the staging is over.)
     if identity_ok {
         if let Ok(manifest) = std::fs::read_to_string(repo.join("AGENT.md")) {
             match manifest_identity_hash(&manifest) {
@@ -731,9 +731,9 @@ pub fn check_restore(repo: &Path, events: &[Event], fixture_facts: bool) -> Chec
                         }
                     }
                 }
-                None => report.notes.push(
-                    "AGENT.md declares no identity_hash — identity integrity is unverified; \
-                     this becomes a failure once reference emitters write digests at init"
+                None => report.failures.push(
+                    "AGENT.md declares no identity_hash — restore step 2 cannot verify identity \
+                     integrity (compute it with the Part I recipe and declare it in the manifest)"
                         .into(),
                 ),
             }
