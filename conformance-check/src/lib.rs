@@ -113,9 +113,95 @@ impl CheckReport {
     }
 }
 
+/// The directory of log segments 2, 3, ... (the Log Segments extension,
+/// `extensions/LOG_SEGMENTS.md`). Segment 1 is `state/events.jsonl`.
+pub const SEGMENTS_DIR: &str = "state/events";
+/// The manifest line that declares the extension.
+pub const SEGMENTS_DECLARATION: &str = "log_segments: 1";
+
+/// Segment `n`'s path (1-based).
+pub fn segment_path(n: usize) -> String {
+    if n == 1 {
+        EVENTS_PATH.to_string()
+    } else {
+        format!("{SEGMENTS_DIR}/{n:06}.jsonl")
+    }
+}
+
+/// The number of a segment file name (`000002.jsonl` -> 2), if it is one.
+fn segment_number(name: &str) -> Option<usize> {
+    let digits = name.strip_suffix(".jsonl")?;
+    if digits.len() != 6 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// Whether the manifest's first fenced block declares log segments.
+pub fn manifest_declares_segments(agent_md: &str) -> bool {
+    manifest_lines(agent_md).any(|l| l == SEGMENTS_DECLARATION)
+}
+
+/// The log's segment paths in order (just `state/events.jsonl` for an
+/// unsegmented log). Fails closed on anything the extension does not allow:
+/// a gap, a stray file in `state/events/`, or segments without the
+/// manifest's declaration.
+pub fn log_segments(repo: &Path) -> Result<Vec<String>, String> {
+    let dir = repo.join(SEGMENTS_DIR);
+    if !dir.exists() {
+        return Ok(vec![EVENTS_PATH.to_string()]);
+    }
+    let entries = std::fs::read_dir(&dir).map_err(|e| format!("cannot read {SEGMENTS_DIR}/: {e}"))?;
+    let mut numbers = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("cannot read {SEGMENTS_DIR}/ entry: {e}"))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        match segment_number(&name) {
+            Some(n) if entry.path().is_file() => numbers.push(n),
+            _ => return Err(format!("{SEGMENTS_DIR}/{name} is not a log segment (expected NNNNNN.jsonl)")),
+        }
+    }
+    numbers.sort_unstable();
+    if numbers.is_empty() {
+        return Ok(vec![EVENTS_PATH.to_string()]);
+    }
+    for (i, n) in numbers.iter().enumerate() {
+        if *n != i + 2 {
+            return Err(format!(
+                "log segments must be contiguous: expected {}, found {}",
+                segment_path(i + 2),
+                segment_path(*n)
+            ));
+        }
+    }
+    let manifest = std::fs::read_to_string(repo.join("AGENT.md")).unwrap_or_default();
+    if !manifest_declares_segments(&manifest) {
+        return Err(format!(
+            "{SEGMENTS_DIR}/ holds log segments but AGENT.md does not declare `{SEGMENTS_DECLARATION}`"
+        ));
+    }
+    let mut paths = vec![EVENTS_PATH.to_string()];
+    paths.extend(numbers.iter().map(|n| segment_path(*n)));
+    Ok(paths)
+}
+
+/// The whole log: its segments' bytes in order. Every segment ends with a
+/// newline and every segment after the first is non-empty, so the
+/// concatenation's lines are exactly the segments' lines.
 pub fn read_log_raw(repo: &Path) -> Result<String, String> {
-    let path = repo.join(EVENTS_PATH);
-    std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+    let mut raw = String::new();
+    for (i, segment) in log_segments(repo)?.iter().enumerate() {
+        let path = repo.join(segment);
+        let part = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        if i > 0 && part.is_empty() {
+            return Err(format!("{segment} is empty"));
+        }
+        if i > 0 && !raw.is_empty() && !raw.ends_with('\n') {
+            return Err(format!("{} does not end with a newline", segment_path(i)));
+        }
+        raw.push_str(&part);
+    }
+    Ok(raw)
 }
 
 pub fn log_lines(raw: &str) -> Vec<String> {
@@ -497,6 +583,20 @@ pub fn check_append_only(repo: &Path) -> CheckReport {
         }
     }
 
+    // Log segments (the Log Segments extension): each is append-only, and
+    // sealed once the next one exists.
+    let mut segments: Vec<String> = Vec::new();
+    match git(repo, &["ls-files", "--", &format!("{SEGMENTS_DIR}/*.jsonl")]) {
+        Ok(listed) => segments.extend(listed.lines().map(str::to_string)),
+        Err(e) => report.failures.push(format!("cannot enumerate log segments: {e}")),
+    }
+    segments.sort();
+    paths.extend(segments.iter().cloned());
+    for (i, next) in segments.iter().enumerate() {
+        let sealed = if i == 0 { EVENTS_PATH.to_string() } else { segments[i - 1].clone() };
+        check_sealed(repo, &sealed, next, &mut report);
+    }
+
     for path in &paths {
         let shas = match git(
             repo,
@@ -571,6 +671,43 @@ pub fn check_append_only(repo: &Path) -> CheckReport {
         }
     }
     report
+}
+
+/// A segment is sealed by the first commit that adds the next one: that
+/// commit must already hold it, and its bytes at HEAD (and in the working
+/// tree) must be the bytes it had then. With append-only, this means no
+/// sealed segment ever gains a line.
+fn check_sealed(repo: &Path, sealed: &str, next: &str, report: &mut CheckReport) {
+    let first = match git(repo, &["rev-list", "--reverse", "--full-history", "HEAD", "--", next]) {
+        Ok(shas) => shas.split_whitespace().next().map(str::to_string),
+        Err(e) => {
+            report.failures.push(format!("{next}: cannot walk history: {e}"));
+            return;
+        }
+    };
+    let Some(first) = first else {
+        return; // not committed yet: nothing sealed in history
+    };
+    let short = &first[..7.min(first.len())];
+    let at_seal = match git(repo, &["show", &format!("{first}:./{sealed}")]) {
+        Ok(content) => content,
+        Err(_) => {
+            report.failures.push(format!("{next}: added in commit {short} before {sealed} existed"));
+            return;
+        }
+    };
+    match git(repo, &["show", &format!("HEAD:./{sealed}")]) {
+        Ok(head) if head == at_seal => {}
+        Ok(_) => report.failures.push(format!(
+            "{sealed}: changed after it was sealed by {next} in commit {short}"
+        )),
+        Err(_) => report.failures.push(format!("{sealed}: missing at HEAD")),
+    }
+    match std::fs::read_to_string(repo.join(sealed)) {
+        Ok(on_disk) if on_disk == at_seal => {}
+        Ok(_) => report.failures.push(format!("{sealed}: working tree changes a sealed segment")),
+        Err(e) => report.failures.push(format!("{sealed}: working tree unreadable: {e}")),
+    }
 }
 
 /// Check 5 — causation integrity: event ids are unique; every non-null
@@ -665,23 +802,18 @@ fn collect_identity_files(repo: &Path, dir: &Path, out: &mut Vec<String>) -> Res
 /// `identity_hash:` from the manifest's first fenced code block (the YAML
 /// envelope). Later fences are prose/examples and are not the manifest.
 fn manifest_identity_hash(agent_md: &str) -> Option<String> {
-    let mut in_fence = false;
-    for line in agent_md.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("```") {
-            if in_fence {
-                break;
-            }
-            in_fence = true;
-            continue;
-        }
-        if in_fence {
-            if let Some(rest) = trimmed.strip_prefix("identity_hash:") {
-                return Some(rest.trim().to_string());
-            }
-        }
-    }
-    None
+    manifest_lines(agent_md)
+        .find_map(|l| l.strip_prefix("identity_hash:").map(|rest| rest.trim().to_string()))
+}
+
+/// The trimmed lines of the manifest's first fenced code block.
+fn manifest_lines(agent_md: &str) -> impl Iterator<Item = &str> {
+    agent_md
+        .lines()
+        .map(str::trim)
+        .skip_while(|l| !l.starts_with("```"))
+        .skip(1)
+        .take_while(|l| !l.starts_with("```"))
 }
 
 /// Check 6 — restore: the manifest and identity are present at their default

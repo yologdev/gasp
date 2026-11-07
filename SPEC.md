@@ -174,6 +174,8 @@ gasp restore <git-url> [--at <event-id>] [--model <model>]
 
 Core restore recovers semantic agent state; it does not guarantee reconstruction of an executor conversation, uncommitted workspace, or in-flight tool execution. The optional [Task Execution Recovery extension](extensions/TASK_RECOVERY.md) defines task-scoped checkpoints, artifact integrity and retention, session versus semantic continuation, canonical publication and external-action reconciliation. It uses existing core vocabulary and leaves core v1 conformance unchanged. Its status is draft; runtime support must be demonstrated separately.
 
+A log that outgrows one file can be split into sealed, ordered segments with the optional [Log Segments extension](extensions/LOG_SEGMENTS.md) (`log-segments/1`): `state/events.jsonl` stays segment 1, later events go to `state/events/000002.jsonl` and onwards, and every check runs over the concatenated log. Its status is draft; conformance-check supports it from 0.3.0.
+
 ## Integration contract — wiring an existing agent in
 
 GASP governs state, not your executor. Keep your model, loop, prompts, and tools; route their state through GASP. Three additive steps — closer to adding OpenTelemetry than adopting a framework:
