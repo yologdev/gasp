@@ -143,27 +143,46 @@ pub fn manifest_declares_segments(agent_md: &str) -> bool {
 }
 
 /// The log's segment paths in order (just `state/events.jsonl` for an
-/// unsegmented log). Fails closed on anything the extension does not allow:
-/// a gap, a stray file in `state/events/`, or segments without the
-/// manifest's declaration.
+/// unsegmented log), as found in the working tree. Fails closed on anything
+/// the extension does not allow: segment files without the manifest's
+/// declaration, a gap, and (once declared) anything else in
+/// `state/events/`. Without the declaration, files in `state/events/` that
+/// are not named like segments are not the extension's business. Segment
+/// numbers run from 2 to 999999.
 pub fn log_segments(repo: &Path) -> Result<Vec<String>, String> {
     let dir = repo.join(SEGMENTS_DIR);
-    if !dir.exists() {
+    let present = dir
+        .try_exists()
+        .map_err(|e| format!("cannot read {SEGMENTS_DIR}/: {e}"))?;
+    if !present {
         return Ok(vec![EVENTS_PATH.to_string()]);
     }
+    let declared = match std::fs::read_to_string(repo.join("AGENT.md")) {
+        Ok(manifest) => manifest_declares_segments(&manifest),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => return Err(format!("cannot read AGENT.md: {e}")),
+    };
     let entries = std::fs::read_dir(&dir).map_err(|e| format!("cannot read {SEGMENTS_DIR}/: {e}"))?;
     let mut numbers = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|e| format!("cannot read {SEGMENTS_DIR}/ entry: {e}"))?;
         let name = entry.file_name().to_string_lossy().to_string();
         match segment_number(&name) {
-            Some(n) if entry.path().is_file() => numbers.push(n),
-            _ => return Err(format!("{SEGMENTS_DIR}/{name} is not a log segment (expected NNNNNN.jsonl)")),
+            Some(n) if n >= 2 && entry.path().is_file() => numbers.push(n),
+            _ if declared => {
+                return Err(format!("{SEGMENTS_DIR}/{name} is not a log segment (expected NNNNNN.jsonl, from 000002)"))
+            }
+            _ => {}
         }
     }
     numbers.sort_unstable();
     if numbers.is_empty() {
         return Ok(vec![EVENTS_PATH.to_string()]);
+    }
+    if !declared {
+        return Err(format!(
+            "{SEGMENTS_DIR}/ holds log segments but AGENT.md does not declare `{SEGMENTS_DECLARATION}`"
+        ));
     }
     for (i, n) in numbers.iter().enumerate() {
         if *n != i + 2 {
@@ -174,30 +193,27 @@ pub fn log_segments(repo: &Path) -> Result<Vec<String>, String> {
             ));
         }
     }
-    let manifest = std::fs::read_to_string(repo.join("AGENT.md")).unwrap_or_default();
-    if !manifest_declares_segments(&manifest) {
-        return Err(format!(
-            "{SEGMENTS_DIR}/ holds log segments but AGENT.md does not declare `{SEGMENTS_DECLARATION}`"
-        ));
-    }
     let mut paths = vec![EVENTS_PATH.to_string()];
     paths.extend(numbers.iter().map(|n| segment_path(*n)));
     Ok(paths)
 }
 
-/// The whole log: its segments' bytes in order. Every segment ends with a
-/// newline and every segment after the first is non-empty, so the
-/// concatenation's lines are exactly the segments' lines.
+/// The whole log: its segments' bytes in order. In a segmented log every
+/// segment ends with a newline and every segment after the first holds at
+/// least one event line, so the concatenation's lines are exactly the
+/// segments' lines. (An unsegmented log is read as core v1 reads it.)
 pub fn read_log_raw(repo: &Path) -> Result<String, String> {
+    let segments = log_segments(repo)?;
+    let segmented = segments.len() > 1;
     let mut raw = String::new();
-    for (i, segment) in log_segments(repo)?.iter().enumerate() {
+    for (i, segment) in segments.iter().enumerate() {
         let path = repo.join(segment);
         let part = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        if i > 0 && part.is_empty() {
-            return Err(format!("{segment} is empty"));
+        if segmented && !part.is_empty() && !part.ends_with('\n') {
+            return Err(format!("{segment} does not end with a newline"));
         }
-        if i > 0 && !raw.is_empty() && !raw.ends_with('\n') {
-            return Err(format!("{} does not end with a newline", segment_path(i)));
+        if i > 0 && part.lines().all(|l| l.trim().is_empty()) {
+            return Err(format!("{segment} holds no events"));
         }
         raw.push_str(&part);
     }
@@ -540,6 +556,13 @@ pub fn check_vocabulary(repo: &Path, events: &[Event]) -> CheckReport {
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
+    git_bytes(repo, args).map(|out| String::from_utf8_lossy(&out).to_string())
+}
+
+/// A git command's raw stdout: file contents are compared as bytes, never
+/// through a lossy UTF-8 conversion (two different invalid sequences would
+/// compare equal).
+fn git_bytes(repo: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     let out = Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -549,7 +572,23 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    Ok(out.stdout)
+}
+
+/// Every path matching `pathspecs` that is tracked now or was in any commit
+/// reachable from HEAD: a path deleted in history must still be walked (and
+/// fail as deleted), so the index alone is not enough.
+fn paths_ever(repo: &Path, pathspecs: &[&str]) -> Result<BTreeSet<String>, String> {
+    let mut found = BTreeSet::new();
+    let mut ls = vec!["-c", "core.quotepath=off", "ls-files", "-z", "--"];
+    ls.extend_from_slice(pathspecs);
+    let mut log = vec!["-c", "core.quotepath=off", "log", "-z", "--format=", "--name-only", "--full-history", "HEAD", "--"];
+    log.extend_from_slice(pathspecs);
+    for args in [ls, log] {
+        let out = git(repo, &args)?;
+        found.extend(out.split('\0').map(|p| p.trim_matches('\n')).filter(|p| !p.is_empty()).map(str::to_string));
+    }
+    Ok(found)
 }
 
 /// Check 4 — append-only-in-git: for every commit touching an append-only
@@ -573,9 +612,9 @@ pub fn check_append_only(repo: &Path) -> CheckReport {
     }
 
     let mut paths: BTreeSet<String> = APPEND_ONLY_STATIC.iter().map(|s| s.to_string()).collect();
-    // the spec's `*/facts.jsonl` glob, resolved against tracked files
-    match git(repo, &["ls-files", "--", "facts.jsonl", "*/facts.jsonl"]) {
-        Ok(listed) => paths.extend(listed.lines().map(str::to_string)),
+    // the spec's `*/facts.jsonl` glob, resolved against tracked files and history
+    match paths_ever(repo, &["facts.jsonl", "*/facts.jsonl"]) {
+        Ok(listed) => paths.extend(listed),
         Err(e) => {
             report
                 .failures
@@ -584,17 +623,25 @@ pub fn check_append_only(repo: &Path) -> CheckReport {
     }
 
     // Log segments (the Log Segments extension): each is append-only, and
-    // sealed once the next one exists.
-    let mut segments: Vec<String> = Vec::new();
-    match git(repo, &["ls-files", "--", &format!("{SEGMENTS_DIR}/*.jsonl")]) {
-        Ok(listed) => segments.extend(listed.lines().map(str::to_string)),
+    // segment n - 1 is sealed once segment n exists. Enumerated from history
+    // too, so deleting a segment fails as a deletion.
+    let segments_glob = format!("{SEGMENTS_DIR}/*.jsonl");
+    match paths_ever(repo, &[&segments_glob]) {
+        Ok(listed) => {
+            let mut numbered: Vec<(usize, String)> = listed
+                .into_iter()
+                .filter_map(|p| {
+                    let name = p.strip_prefix(&format!("{SEGMENTS_DIR}/"))?;
+                    segment_number(name).filter(|n| *n >= 2).map(|n| (n, p.clone()))
+                })
+                .collect();
+            numbered.sort();
+            for (n, next) in &numbered {
+                check_sealed(repo, &segment_path(n - 1), next, &mut report);
+                paths.insert(next.clone());
+            }
+        }
         Err(e) => report.failures.push(format!("cannot enumerate log segments: {e}")),
-    }
-    segments.sort();
-    paths.extend(segments.iter().cloned());
-    for (i, next) in segments.iter().enumerate() {
-        let sealed = if i == 0 { EVENTS_PATH.to_string() } else { segments[i - 1].clone() };
-        check_sealed(repo, &sealed, next, &mut report);
     }
 
     for path in &paths {
@@ -622,12 +669,12 @@ pub fn check_append_only(repo: &Path) -> CheckReport {
             continue;
         }
         let spec = |sha: &str| format!("{sha}:./{path}");
-        let mut prev: Option<String> = None;
+        let mut prev: Option<Vec<u8>> = None;
         for sha in &shas {
-            match git(repo, &["show", &spec(sha)]) {
+            match git_bytes(repo, &["show", &spec(sha)]) {
                 Ok(content) => {
                     if let Some(prev) = &prev {
-                        if !content.starts_with(prev.as_str()) {
+                        if !content.starts_with(prev) {
                             report.failures.push(format!(
                                 "{path}: commit {} edits existing lines (not append-only)",
                                 &sha[..7.min(sha.len())]
@@ -649,9 +696,9 @@ pub fn check_append_only(repo: &Path) -> CheckReport {
             }
         }
         if let Some(prev) = &prev {
-            match std::fs::read_to_string(repo.join(path)) {
+            match std::fs::read(repo.join(path)) {
                 Ok(on_disk) => {
-                    if !on_disk.starts_with(prev.as_str()) {
+                    if !on_disk.starts_with(prev) {
                         report
                             .failures
                             .push(format!("{path}: working tree edits committed lines"));
@@ -676,7 +723,8 @@ pub fn check_append_only(repo: &Path) -> CheckReport {
 /// A segment is sealed by the first commit that adds the next one: that
 /// commit must already hold it, and its bytes at HEAD (and in the working
 /// tree) must be the bytes it had then. With append-only, this means no
-/// sealed segment ever gains a line.
+/// sealed segment ever gains a line. (A sealed segment deleted later fails
+/// as a deletion in the append-only walk.)
 fn check_sealed(repo: &Path, sealed: &str, next: &str, report: &mut CheckReport) {
     let first = match git(repo, &["rev-list", "--reverse", "--full-history", "HEAD", "--", next]) {
         Ok(shas) => shas.split_whitespace().next().map(str::to_string),
@@ -689,21 +737,30 @@ fn check_sealed(repo: &Path, sealed: &str, next: &str, report: &mut CheckReport)
         return; // not committed yet: nothing sealed in history
     };
     let short = &first[..7.min(first.len())];
-    let at_seal = match git(repo, &["show", &format!("{first}:./{sealed}")]) {
+    let exists = |rev: &str| git(repo, &["cat-file", "-e", &format!("{rev}:./{sealed}")]).is_ok();
+    if !exists(&first) {
+        report.failures.push(format!("{next}: added in commit {short} before {sealed} existed"));
+        return;
+    }
+    let at_seal = match git_bytes(repo, &["show", &format!("{first}:./{sealed}")]) {
         Ok(content) => content,
-        Err(_) => {
-            report.failures.push(format!("{next}: added in commit {short} before {sealed} existed"));
+        Err(e) => {
+            report.failures.push(format!("{sealed}: cannot read it at commit {short}: {e}"));
             return;
         }
     };
-    match git(repo, &["show", &format!("HEAD:./{sealed}")]) {
-        Ok(head) if head == at_seal => {}
-        Ok(_) => report.failures.push(format!(
-            "{sealed}: changed after it was sealed by {next} in commit {short}"
-        )),
-        Err(_) => report.failures.push(format!("{sealed}: missing at HEAD")),
+    if exists("HEAD") {
+        match git_bytes(repo, &["show", &format!("HEAD:./{sealed}")]) {
+            Ok(head) if head == at_seal => {}
+            Ok(_) => report.failures.push(format!(
+                "{sealed}: changed after it was sealed by {next} in commit {short}"
+            )),
+            Err(e) => report.failures.push(format!("{sealed}: cannot read it at HEAD: {e}")),
+        }
+    } else {
+        report.failures.push(format!("{sealed}: missing at HEAD (sealed by {next} in commit {short})"));
     }
-    match std::fs::read_to_string(repo.join(sealed)) {
+    match std::fs::read(repo.join(sealed)) {
         Ok(on_disk) if on_disk == at_seal => {}
         Ok(_) => report.failures.push(format!("{sealed}: working tree changes a sealed segment")),
         Err(e) => report.failures.push(format!("{sealed}: working tree unreadable: {e}")),
@@ -1050,7 +1107,7 @@ pub fn run_all(repo: &Path, fixture_facts: bool) -> Vec<CheckReport> {
                 CheckReport::failed(n, name, "log unavailable (see check 1)".into())
             };
             return vec![
-                CheckReport::failed(1, "envelope round-trip", format!("{EVENTS_PATH}: {e}")),
+                CheckReport::failed(1, "envelope round-trip", format!("log: {e}")),
                 unavailable(2, "replay"),
                 unavailable(3, "vocabulary"),
                 check_append_only(repo),

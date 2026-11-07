@@ -857,9 +857,83 @@ fn segments_need_the_declaration_and_no_gaps() {
     std::fs::write(repo.join(SEGMENTS_DIR).join("notes.txt"), "x").unwrap();
     assert!(read_log_raw(&repo).unwrap_err().contains("not a log segment"));
     std::fs::remove_file(repo.join(SEGMENTS_DIR).join("notes.txt")).unwrap();
-    // An empty segment.
+    // An empty segment, and one holding only a blank line.
     std::fs::write(repo.join(segment_path(3)), "").unwrap();
-    assert!(read_log_raw(&repo).unwrap_err().contains("is empty"));
+    assert!(read_log_raw(&repo).unwrap_err().contains("holds no events"));
+    std::fs::write(repo.join(segment_path(3)), "\n").unwrap();
+    assert!(read_log_raw(&repo).unwrap_err().contains("holds no events"));
+    std::fs::remove_file(repo.join(segment_path(3))).unwrap();
+    // The last segment must end with a newline too.
+    let seg2 = std::fs::read_to_string(repo.join(segment_path(2))).unwrap();
+    std::fs::write(repo.join(segment_path(2)), seg2.trim_end_matches('\n')).unwrap();
+    assert!(read_log_raw(&repo).unwrap_err().contains("does not end with a newline"));
+    std::fs::write(repo.join(segment_path(2)), &seg2).unwrap();
+    // So must an earlier one.
+    let seg1 = std::fs::read_to_string(repo.join(EVENTS_PATH)).unwrap();
+    std::fs::write(repo.join(EVENTS_PATH), seg1.trim_end_matches('\n')).unwrap();
+    assert!(read_log_raw(&repo).unwrap_err().contains("does not end with a newline"));
+}
+
+#[test]
+fn an_undeclared_repository_keeps_core_behavior() {
+    // Without the declaration, files in state/events/ that are not named
+    // like segments are not the extension's business (core v1 repositories
+    // check as before); a segment-named file without it fails.
+    let dir = fixture_in_temp_git();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(repo.join(SEGMENTS_DIR)).unwrap();
+    std::fs::write(repo.join(SEGMENTS_DIR).join("notes.txt"), "x").unwrap();
+    assert_eq!(read_log_raw(&repo).unwrap(), fixture_raw());
+    std::fs::write(repo.join(segment_path(2)), "x\n").unwrap();
+    assert!(read_log_raw(&repo).unwrap_err().contains("does not declare"));
+}
+
+#[test]
+fn deleting_a_segment_fails_check_4() {
+    let dir = segmented_fixture(4);
+    let repo = dir.path().join("repo");
+    let raw = fixture_raw();
+    let lines: Vec<&str> = raw.split_inclusive('\n').collect();
+    // Split segment 2 so that segment 3 holds the last two lines.
+    std::fs::write(repo.join(segment_path(2)), lines[4..lines.len() - 2].concat()).unwrap();
+    // (rebuild a clean history: segment 2 without its tail, then segment 3)
+    std::fs::remove_dir_all(repo.join(".git")).unwrap();
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["config", "user.name", "t"]);
+    git(&repo, &["config", "user.email", "t@t"]);
+    commit_all(&repo, "segments 1-2");
+    std::fs::write(repo.join(segment_path(3)), lines[lines.len() - 2..].concat()).unwrap();
+    commit_all(&repo, "segment 3");
+    for report in run_all(&repo, true) {
+        assert!(report.passed(), "check {} failed: {:?}", report.number, report.failures);
+    }
+    // Deleting the last segment leaves a shorter log that still folds; check 4 catches it.
+    git(&repo, &["rm", "-q", &segment_path(3)]);
+    commit_all(&repo, "drop segment 3");
+    assert!(fails_with(&check_append_only(&repo), "deleted in commit"), "{:?}", check_append_only(&repo));
+}
+
+#[test]
+fn the_sealing_commit_may_extend_the_segment_it_seals() {
+    let dir = fixture_in_temp_git();
+    let repo = dir.path().join("repo");
+    std::fs::remove_dir_all(repo.join(".git")).unwrap();
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["config", "user.name", "t"]);
+    git(&repo, &["config", "user.email", "t@t"]);
+    let raw = fixture_raw();
+    let lines: Vec<&str> = raw.split_inclusive('\n').collect();
+    std::fs::write(repo.join(EVENTS_PATH), lines[..4].concat()).unwrap();
+    declare_segments(&repo);
+    commit_all(&repo, "segment 1");
+    // One commit appends to segment 1 and starts segment 2.
+    std::fs::write(repo.join(EVENTS_PATH), lines[..6].concat()).unwrap();
+    std::fs::create_dir_all(repo.join(SEGMENTS_DIR)).unwrap();
+    std::fs::write(repo.join(segment_path(2)), lines[6..].concat()).unwrap();
+    commit_all(&repo, "extend and seal segment 1");
+    for report in run_all(&repo, true) {
+        assert!(report.passed(), "check {} failed: {:?}", report.number, report.failures);
+    }
 }
 
 #[test]

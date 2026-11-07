@@ -24,8 +24,8 @@ state/
     └── ...
 ```
 
-- **Names.** Segment `n` (for `n` ≥ 2) is `state/events/` followed by `n` as six zero-padded digits and `.jsonl`. Numbers are contiguous from 2. `state/events/` holds nothing else.
-- **Format.** Every segment has the core log format: one event envelope per line, and each line ends with a newline. Every segment after the first is non-empty.
+- **Names.** Segment `n` (for 2 ≤ `n` ≤ 999999) is `state/events/` followed by `n` as six zero-padded digits and `.jsonl`. Numbers are contiguous from 2. In a declared repository (§3), `state/events/` holds nothing else.
+- **Format.** Every segment has the core log format: one event envelope per line, and each line ends with a newline, including the last line of the last segment. Every segment after the first holds at least one event.
 - **The logical log.** The log is the concatenation of the segments in number order. All of core GASP is defined over the logical log:
   - the total order of events (Part I, "Ordering");
   - causation, which may name an event in an earlier segment;
@@ -39,27 +39,32 @@ When to start a new segment is the runtime's choice. It SHOULD start one before 
 
 ## 3. Declaration
 
-A repository with more than one segment MUST declare the extension in `AGENT.md`'s manifest block, with a line of its own:
+A repository with more than one segment MUST declare the extension in `AGENT.md`'s manifest block (its first fenced block), with a line of its own:
 
 ```yaml
 spec_version: 1
 log_segments: 1
 ```
 
-A reader that does not support the extension would see only segment 1 and fold an incomplete history. The declaration lets a reader that does support it refuse such a repository rather than fold it silently. A checker or runtime that supports `log-segments/1` MUST treat segments without the declaration as non-conformant. Declaring the extension with only one segment is allowed.
+A reader that does not support the extension would see only segment 1 and fold an incomplete history. The declaration lets a reader that does support it refuse such a repository rather than fold it silently. A checker or runtime that supports `log-segments/1` MUST treat segment files without the declaration as non-conformant. Declaring the extension with only one segment is allowed. Without the declaration, other files under `state/events/` are not this extension's concern, so an existing core repository checks as before.
 
 ## 4. Conformance (Part VI deltas)
 
 With the extension, the checks change as follows. Every other check is unchanged.
 
-- **Check 1 (envelope round-trip):** runs on the logical log, which must be readable. A gap in segment numbers, a stray file in `state/events/`, an empty segment, a segment not ending with a newline, or segments without the declaration all fail.
+- **Check 1 (envelope round-trip):** runs on the logical log, read from the working tree, which must be readable. Each of these fails:
+  - segment files without the declaration;
+  - a gap in segment numbers;
+  - a stray file in a declared `state/events/`;
+  - a segment after the first with no event;
+  - a segment of a segmented log not ending with a newline.
 - **Checks 2, 3, 5, 6 and 7:** run on the logical log.
-- **Check 4 (append-only in git):** every segment is an append-only path. In addition, for each segment `n` ≥ 2:
+- **Check 4 (append-only in git):** every segment that is tracked, or appears in any commit reachable from `HEAD`, is an append-only path, so deleting a segment fails as a deletion. In addition, for each segment `n` ≥ 2:
   - the first commit that adds segment `n` must already contain segment `n − 1`;
-  - segment `n − 1`'s bytes at `HEAD`, and in the working tree, must equal its bytes at that commit.
+  - segment `n − 1`'s bytes at `HEAD`, and in the working tree, must equal its bytes at that commit. The sealing commit itself may still append to segment `n − 1`.
 
 ## 5. Runtimes and hosts
 
 - **Restore** concatenates the segments, or folds them one after another; the result is the same. Restoring from a snapshot works unchanged, because its integrity record is defined over the logical log.
-- **A host that validates each publication** only has to read the active segment and any new segments. Sealed segments are compared by blob id.
+- **A host that validates each publication** and keeps an index of earlier event ids and kinds only has to read the active segment and any new segments. Sealed segments are compared by blob id.
 - **Moving an unsegmented repository** to segments needs no rewrite: its `state/events.jsonl` becomes segment 1 and is sealed when segment 2 is first committed.
