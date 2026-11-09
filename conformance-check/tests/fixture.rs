@@ -792,3 +792,381 @@ fn a_dangling_op_is_readable_and_reported_not_failed() {
         report.notes
     );
 }
+
+// ---- the Log Segments extension (extensions/LOG_SEGMENTS.md) ----
+
+fn commit_all(repo: &Path, message: &str) {
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", message]);
+}
+
+fn declare_segments(repo: &Path) {
+    let manifest = std::fs::read_to_string(repo.join("AGENT.md")).unwrap();
+    let declared = manifest.replacen("spec_version: 1\n", "spec_version: 1\nlog_segments: 1\n", 1);
+    assert_ne!(manifest, declared, "the fixture manifest changed shape");
+    std::fs::write(repo.join("AGENT.md"), declared).unwrap();
+}
+
+/// The fixture with its log split after line `at`: segment 1 committed
+/// first, then sealed by segment 2 in a second commit.
+fn segmented_fixture(at: usize) -> tempfile::TempDir {
+    let dir = fixture_in_temp_git();
+    let repo = dir.path().join("repo");
+    // A fresh history whose first commit holds only segment 1's lines.
+    std::fs::remove_dir_all(repo.join(".git")).unwrap();
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["config", "user.name", "t"]);
+    git(&repo, &["config", "user.email", "t@t"]);
+    let raw = fixture_raw();
+    let lines: Vec<&str> = raw.split_inclusive('\n').collect();
+    std::fs::write(repo.join(EVENTS_PATH), lines[..at].concat()).unwrap();
+    declare_segments(&repo);
+    commit_all(&repo, "segment 1");
+    std::fs::create_dir_all(repo.join(SEGMENTS_DIR)).unwrap();
+    std::fs::write(repo.join(segment_path(2)), lines[at..].concat()).unwrap();
+    commit_all(&repo, "seal segment 1, start segment 2");
+    dir
+}
+
+#[test]
+fn segmented_fixture_passes_all_checks() {
+    let dir = segmented_fixture(6);
+    let repo = dir.path().join("repo");
+    assert_eq!(log_segments(&repo).unwrap(), vec![EVENTS_PATH.to_string(), segment_path(2)]);
+    assert_eq!(read_log_raw(&repo).unwrap(), fixture_raw(), "the logical log is the concatenation");
+    for report in run_all(&repo, true) {
+        assert!(report.passed(), "check {} ({}) failed: {:?}", report.number, report.name, report.failures);
+    }
+}
+
+#[test]
+fn segments_without_the_declaration_fail_check_1() {
+    let dir = segmented_fixture(6);
+    let repo = dir.path().join("repo");
+    // Undeclared: check 1 fails (the log is unavailable), never a silent fold of segment 1.
+    let manifest = std::fs::read_to_string(repo.join("AGENT.md")).unwrap();
+    std::fs::write(repo.join("AGENT.md"), manifest.replace("log_segments: 1\n", "")).unwrap();
+    let reports = run_all(&repo, false);
+    assert!(fails_with(&reports[0], "does not declare"), "{:?}", reports[0]);
+}
+
+#[test]
+fn a_gap_in_segment_numbers_fails() {
+    let dir = segmented_fixture(6);
+    let repo = dir.path().join("repo");
+    std::fs::rename(repo.join(segment_path(2)), repo.join(segment_path(3))).unwrap();
+    assert!(read_log_raw(&repo).unwrap_err().contains("contiguous"));
+}
+
+#[test]
+fn a_declared_segments_directory_holds_only_segments() {
+    for (name, dir_not_file) in [("notes.txt", false), (".DS_Store", false), ("000001.jsonl", false), ("2.jsonl", false), ("0000003.jsonl", false), ("000003.jsonl", true)] {
+        let dir = segmented_fixture(6);
+        let repo = dir.path().join("repo");
+        let path = repo.join(SEGMENTS_DIR).join(name);
+        if dir_not_file {
+            std::fs::create_dir_all(&path).unwrap();
+        } else {
+            std::fs::write(&path, "x\n").unwrap();
+        }
+        let e = read_log_raw(&repo).unwrap_err();
+        assert!(e.contains("not a log segment") || e.contains("is not one"), "{name}: {e}");
+    }
+}
+
+#[test]
+fn an_empty_later_segment_fails() {
+    for content in ["", "\n"] {
+        let dir = segmented_fixture(6);
+        let repo = dir.path().join("repo");
+        std::fs::write(repo.join(segment_path(3)), content).unwrap();
+        assert!(read_log_raw(&repo).unwrap_err().contains("holds no events"), "{content:?}");
+    }
+}
+
+#[test]
+fn every_segment_of_a_segmented_log_ends_with_a_newline() {
+    for segment in [segment_path(2), EVENTS_PATH.to_string()] {
+        let dir = segmented_fixture(6);
+        let repo = dir.path().join("repo");
+        let text = std::fs::read_to_string(repo.join(&segment)).unwrap();
+        std::fs::write(repo.join(&segment), text.trim_end_matches('\n')).unwrap();
+        assert!(read_log_raw(&repo).unwrap_err().contains("does not end with a newline"), "{segment}");
+    }
+}
+
+#[test]
+fn a_declared_log_with_one_segment_checks_as_core() {
+    // No state/events/ at all, and an empty one: both a one-segment log.
+    let dir = fixture_in_temp_git();
+    let repo = dir.path().join("repo");
+    declare_segments(&repo);
+    commit_all(&repo, "declare");
+    assert_eq!(log_segments(&repo).unwrap(), vec![EVENTS_PATH.to_string()]);
+    std::fs::create_dir_all(repo.join(SEGMENTS_DIR)).unwrap();
+    assert_eq!(read_log_raw(&repo).unwrap(), fixture_raw());
+    for report in run_all(&repo, true) {
+        assert!(report.passed(), "check {} failed: {:?}", report.number, report.failures);
+    }
+}
+
+#[test]
+fn the_declaration_is_exactly_one_line_of_the_manifest_block() {
+    let base = std::fs::read_to_string(fixture_dir().join("AGENT.md")).unwrap();
+    let with = |line: &str| base.replacen("spec_version: 1\n", &format!("spec_version: 1\n{line}\n"), 1);
+    assert_eq!(manifest_declares_segments(&with("log_segments: 1")), Ok(true));
+    assert_eq!(manifest_declares_segments(&with("log_segments: 1   ")), Ok(true));
+    assert_eq!(manifest_declares_segments(&base), Ok(false));
+    for refused in ["log_segments: 2", "log_segments: \"1\"", "log_segments: 1 # segmented", "  log_segments: 1", "log_segments:  1"] {
+        assert!(manifest_declares_segments(&with(refused)).is_err(), "{refused:?} was accepted or ignored");
+    }
+    // Only the first fenced block is the manifest: a later fence is prose.
+    let later = format!("{base}\n```yaml\nlog_segments: 1\n```\n");
+    assert_eq!(manifest_declares_segments(&later), Ok(false));
+}
+
+#[test]
+fn an_unreadable_declaration_fails_check_1() {
+    let dir = segmented_fixture(6);
+    let repo = dir.path().join("repo");
+    let manifest = std::fs::read_to_string(repo.join("AGENT.md")).unwrap();
+    std::fs::write(repo.join("AGENT.md"), manifest.replace("log_segments: 1\n", "log_segments: 2\n")).unwrap();
+    assert!(read_log_raw(&repo).unwrap_err().contains("not a log-segments declaration"));
+}
+
+#[test]
+fn an_undeclared_repository_keeps_core_behavior() {
+    // Without the declaration, files in state/events/ that are not named
+    // like segments are not the extension's business (core v1 repositories
+    // check as before); a segment-named file without it fails.
+    let dir = fixture_in_temp_git();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(repo.join(SEGMENTS_DIR)).unwrap();
+    std::fs::write(repo.join(SEGMENTS_DIR).join("notes.txt"), "x").unwrap();
+    assert_eq!(read_log_raw(&repo).unwrap(), fixture_raw());
+    std::fs::write(repo.join(segment_path(2)), "x\n").unwrap();
+    assert!(read_log_raw(&repo).unwrap_err().contains("does not declare"));
+    std::fs::remove_file(repo.join(segment_path(2))).unwrap();
+    // Named like a segment but numbered below 2, or not a file: refused, not ignored.
+    std::fs::write(repo.join(SEGMENTS_DIR).join("000001.jsonl"), "x\n").unwrap();
+    assert!(read_log_raw(&repo).unwrap_err().contains("is not one"));
+    std::fs::remove_file(repo.join(SEGMENTS_DIR).join("000001.jsonl")).unwrap();
+    std::fs::create_dir_all(repo.join(segment_path(2))).unwrap();
+    assert!(read_log_raw(&repo).unwrap_err().contains("is not one"));
+}
+
+#[test]
+fn an_undeclared_repository_s_state_events_history_is_not_append_only() {
+    // Core v1 does not make state/events/ append-only: a core repository
+    // that once committed and removed a file there still passes check 4.
+    let dir = fixture_in_temp_git();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(repo.join(SEGMENTS_DIR)).unwrap();
+    // Named like a segment, but the repository never declares the extension.
+    std::fs::write(repo.join(segment_path(2)), "x\n").unwrap();
+    commit_all(&repo, "scratch");
+    git(&repo, &["rm", "-q", "-r", SEGMENTS_DIR]);
+    commit_all(&repo, "drop scratch");
+    assert!(check_append_only(&repo).passed(), "{:?}", check_append_only(&repo));
+}
+
+#[test]
+fn dropping_the_declaration_with_the_segments_is_still_a_deletion() {
+    let dir = segmented_fixture(6);
+    let repo = dir.path().join("repo");
+    git(&repo, &["rm", "-q", "-r", SEGMENTS_DIR]);
+    let manifest = std::fs::read_to_string(repo.join("AGENT.md")).unwrap();
+    std::fs::write(repo.join("AGENT.md"), manifest.replace("log_segments: 1\n", "")).unwrap();
+    commit_all(&repo, "back to one file, history shortened");
+    let report = check_append_only(&repo);
+    assert!(fails_with(&report, &format!("{}: deleted in commit", segment_path(2))), "{report:?}");
+}
+
+#[test]
+fn a_deleted_facts_file_fails_check_4() {
+    // Core check 4: facts files are found in history, not only in the index,
+    // so `git rm` of one fails as a deletion (since conformance-check 0.3.0).
+    let dir = fixture_in_temp_git();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(repo.join("old")).unwrap();
+    std::fs::write(repo.join("old/facts.jsonl"), "fact one\n").unwrap();
+    commit_all(&repo, "a fact");
+    git(&repo, &["rm", "-q", "old/facts.jsonl"]);
+    commit_all(&repo, "drop it");
+    let report = check_append_only(&repo);
+    assert!(fails_with(&report, "old/facts.jsonl: deleted in commit"), "{report:?}");
+}
+
+#[test]
+fn deleting_a_segment_fails_check_4() {
+    let dir = segmented_fixture(4);
+    let repo = dir.path().join("repo");
+    let raw = fixture_raw();
+    let lines: Vec<&str> = raw.split_inclusive('\n').collect();
+    // Split segment 2 so that segment 3 holds the last two lines.
+    std::fs::write(repo.join(segment_path(2)), lines[4..lines.len() - 2].concat()).unwrap();
+    // (rebuild a clean history: segment 2 without its tail, then segment 3)
+    std::fs::remove_dir_all(repo.join(".git")).unwrap();
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["config", "user.name", "t"]);
+    git(&repo, &["config", "user.email", "t@t"]);
+    commit_all(&repo, "segments 1-2");
+    std::fs::write(repo.join(segment_path(3)), lines[lines.len() - 2..].concat()).unwrap();
+    commit_all(&repo, "segment 3");
+    for report in run_all(&repo, true) {
+        assert!(report.passed(), "check {} failed: {:?}", report.number, report.failures);
+    }
+    // Deleting the last segment leaves a shorter log that still folds; check 4 catches it.
+    git(&repo, &["rm", "-q", &segment_path(3)]);
+    commit_all(&repo, "drop segment 3");
+    assert!(fails_with(&check_append_only(&repo), "deleted in commit"), "{:?}", check_append_only(&repo));
+}
+
+#[test]
+fn the_sealing_commit_may_extend_the_segment_it_seals() {
+    let dir = fixture_in_temp_git();
+    let repo = dir.path().join("repo");
+    std::fs::remove_dir_all(repo.join(".git")).unwrap();
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["config", "user.name", "t"]);
+    git(&repo, &["config", "user.email", "t@t"]);
+    let raw = fixture_raw();
+    let lines: Vec<&str> = raw.split_inclusive('\n').collect();
+    std::fs::write(repo.join(EVENTS_PATH), lines[..4].concat()).unwrap();
+    declare_segments(&repo);
+    commit_all(&repo, "segment 1");
+    // One commit appends to segment 1 and starts segment 2.
+    std::fs::write(repo.join(EVENTS_PATH), lines[..6].concat()).unwrap();
+    std::fs::create_dir_all(repo.join(SEGMENTS_DIR)).unwrap();
+    std::fs::write(repo.join(segment_path(2)), lines[6..].concat()).unwrap();
+    commit_all(&repo, "extend and seal segment 1");
+    for report in run_all(&repo, true) {
+        assert!(report.passed(), "check {} failed: {:?}", report.number, report.failures);
+    }
+}
+
+#[test]
+fn a_sealed_segment_never_changes() {
+    let dir = segmented_fixture(6);
+    let repo = dir.path().join("repo");
+    assert!(check_append_only(&repo).passed());
+    // Moving the last line of segment 2 back into segment 1 keeps the
+    // logical log identical, but appends to a sealed segment: check 4 fails.
+    let seg1 = std::fs::read_to_string(repo.join(EVENTS_PATH)).unwrap();
+    let seg2 = std::fs::read_to_string(repo.join(segment_path(2))).unwrap();
+    let (first, rest) = seg2.split_at(seg2.find('\n').unwrap() + 1);
+    std::fs::write(repo.join(EVENTS_PATH), format!("{seg1}{first}")).unwrap();
+    assert!(fails_with(&check_append_only(&repo), "working tree changes a sealed segment"));
+    std::fs::write(repo.join(segment_path(2)), rest).unwrap();
+    commit_all(&repo, "append to a sealed segment");
+    assert!(fails_with(&check_append_only(&repo), "changed after it was sealed"));
+}
+
+#[test]
+fn a_segment_cannot_precede_its_predecessor() {
+    let dir = fixture_in_temp_git();
+    let repo = dir.path().join("repo");
+    declare_segments(&repo);
+    std::fs::create_dir_all(repo.join(SEGMENTS_DIR)).unwrap();
+    std::fs::write(repo.join(segment_path(3)), "x\n").unwrap();
+    commit_all(&repo, "segment 3 first");
+    std::fs::write(repo.join(segment_path(2)), "y\n").unwrap();
+    commit_all(&repo, "then segment 2");
+    let report = check_append_only(&repo);
+    assert!(fails_with(&report, &format!("{}: added in commit", segment_path(3))), "{report:?}");
+    assert!(fails_with(&report, &format!("before {} existed", segment_path(2))), "{report:?}");
+}
+
+#[test]
+fn a_snapshot_over_the_logical_log_verifies() {
+    let dir = segmented_fixture(4);
+    let repo = dir.path().join("repo");
+    // Line 8 lies in segment 2: the integrity record counts logical lines.
+    let snapshot = valid_snapshot(&repo, 8);
+    let name = snapshot["integrity"]["event_id"].as_str().unwrap().to_string();
+    write_snapshot(&repo, &name, &snapshot);
+    let events = parse_events(&log_lines(&read_log_raw(&repo).unwrap())).unwrap();
+    let report = check_replay(&repo, &events, &read_log_raw(&repo).unwrap());
+    assert!(report.passed(), "{report:?}");
+}
+
+/// The fixture in three segments: 1 sealed by 2, then 2 sealed by 3.
+fn three_segment_fixture() -> tempfile::TempDir {
+    let dir = segmented_fixture(4);
+    let repo = dir.path().join("repo");
+    let raw = fixture_raw();
+    let lines: Vec<&str> = raw.split_inclusive('\n').collect();
+    let cut = lines.len() - 2;
+    std::fs::remove_dir_all(repo.join(".git")).unwrap();
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["config", "user.name", "t"]);
+    git(&repo, &["config", "user.email", "t@t"]);
+    std::fs::remove_dir_all(repo.join(SEGMENTS_DIR)).unwrap();
+    commit_all(&repo, "segment 1");
+    std::fs::create_dir_all(repo.join(SEGMENTS_DIR)).unwrap();
+    std::fs::write(repo.join(segment_path(2)), lines[4..cut].concat()).unwrap();
+    commit_all(&repo, "segment 2");
+    std::fs::write(repo.join(segment_path(3)), lines[cut..].concat()).unwrap();
+    commit_all(&repo, "segment 3");
+    dir
+}
+
+#[test]
+fn segment_2_is_sealed_by_segment_3() {
+    let dir = three_segment_fixture();
+    let repo = dir.path().join("repo");
+    for report in run_all(&repo, true) {
+        assert!(report.passed(), "check {} failed: {:?}", report.number, report.failures);
+    }
+    // Move segment 3's first line to the end of segment 2: the logical log
+    // is unchanged, but segment 2 is sealed.
+    let seg2 = std::fs::read_to_string(repo.join(segment_path(2))).unwrap();
+    let seg3 = std::fs::read_to_string(repo.join(segment_path(3))).unwrap();
+    let (first, rest) = seg3.split_at(seg3.find('\n').unwrap() + 1);
+    std::fs::write(repo.join(segment_path(2)), format!("{seg2}{first}")).unwrap();
+    std::fs::write(repo.join(segment_path(3)), rest).unwrap();
+    commit_all(&repo, "append to sealed segment 2");
+    let report = check_append_only(&repo);
+    assert!(fails_with(&report, &format!("{}: changed after it was sealed by {}", segment_path(2), segment_path(3))), "{report:?}");
+}
+
+#[test]
+fn a_segment_added_in_a_merge_and_deleted_later_fails_check_4() {
+    // git log --name-only lists no files for a merge without -m: a segment
+    // that only a merge adds must still be found in history.
+    let dir = segmented_fixture(6);
+    let repo = dir.path().join("repo");
+    let raw = fixture_raw();
+    let lines: Vec<&str> = raw.split_inclusive('\n').collect();
+    // Rebuild: segments 1 and 2 hold all but the last line on main.
+    std::fs::write(repo.join(segment_path(2)), lines[6..lines.len() - 1].concat()).unwrap();
+    std::fs::remove_dir_all(repo.join(".git")).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.name", "t"]);
+    git(&repo, &["config", "user.email", "t@t"]);
+    commit_all(&repo, "segments 1-2");
+    git(&repo, &["checkout", "-q", "-b", "side"]);
+    std::fs::write(repo.join("side.txt"), "x\n").unwrap();
+    commit_all(&repo, "side work");
+    git(&repo, &["checkout", "-q", "main"]);
+    std::fs::write(repo.join("main.txt"), "y\n").unwrap();
+    commit_all(&repo, "main work");
+    // The merge resolution itself starts segment 3.
+    git(&repo, &["merge", "-q", "--no-ff", "--no-commit", "side"]);
+    std::fs::write(repo.join(segment_path(3)), lines[lines.len() - 1..].concat()).unwrap();
+    commit_all(&repo, "merge, starting segment 3");
+    for report in run_all(&repo, true) {
+        assert!(report.passed(), "check {} failed: {:?}", report.number, report.failures);
+    }
+    // Dropped again in another merge's resolution: no ordinary commit ever
+    // touches segment 3, so only `log -m` lists it.
+    git(&repo, &["checkout", "-q", "side"]);
+    std::fs::write(repo.join("side.txt"), "x\nz\n").unwrap();
+    commit_all(&repo, "more side work");
+    git(&repo, &["checkout", "-q", "main"]);
+    git(&repo, &["merge", "-q", "--no-ff", "--no-commit", "side"]);
+    git(&repo, &["rm", "-q", &segment_path(3)]);
+    commit_all(&repo, "merge, dropping segment 3");
+    let report = check_append_only(&repo);
+    assert!(fails_with(&report, &format!("{}: deleted in commit", segment_path(3))), "{report:?}");
+}
